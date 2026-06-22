@@ -1,0 +1,80 @@
+import React from 'react'
+import { ProgressBar } from './ProgressBar'
+import { CheckCircle2, XCircle, BookOpen } from 'lucide-react'
+
+export const MemberRow = ({ member }) => {
+  const { name, email, current_book_title, last_page, total_pages, read_today } = member
+
+  // Calculate percentage progress safely
+  const progressPercent = total_pages > 0 ? (last_page / total_pages) * 100 : 0
+
+  const getInitials = (name) => {
+    if (!name) return 'م'
+    return name.trim().split(' ').map(n => n[0]).join('').slice(0, 2)
+  }
+
+  return (
+    <tr className="hover:bg-[#F8F7F4]/50 border-b border-cardBorder transition-colors duration-150">
+      
+      {/* Avatar + Name */}
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="flex items-center space-x-3 space-x-reverse">
+          <div className="w-10 h-10 rounded-custom bg-primary-light text-primary flex items-center justify-center font-bold text-sm shadow-sm border border-primary/10">
+            {getInitials(name)}
+          </div>
+          <div className="text-right">
+            <div className="text-sm font-semibold text-textPrimary">{name || 'قارئ مجهول'}</div>
+            <div className="text-xs text-textSecondary">{email}</div>
+          </div>
+        </div>
+      </td>
+
+      {/* Current Book */}
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="text-right max-w-xs truncate">
+          {current_book_title ? (
+            <div className="flex items-center space-x-2 space-x-reverse text-sm text-textPrimary font-medium">
+              <BookOpen className="w-4 h-4 text-primary shrink-0" />
+              <span className="truncate">{current_book_title}</span>
+            </div>
+          ) : (
+            <span className="text-xs text-textSecondary italic">لم يبدأ أي كتاب بعد</span>
+          )}
+        </div>
+      </td>
+
+      {/* Progress Bar + % */}
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="w-48 text-right">
+          {current_book_title ? (
+            <div>
+              <ProgressBar progress={progressPercent} showLabel={false} size="sm" />
+              <div className="flex justify-between items-center text-[10px] text-textSecondary mt-1 font-semibold">
+                <span>{last_page} من {total_pages} صفحة</span>
+                <span>{Math.round(progressPercent)}%</span>
+              </div>
+            </div>
+          ) : (
+            <span className="text-xs text-textSecondary">-</span>
+          )}
+        </div>
+      </td>
+
+      {/* Read Today Status Badge */}
+      <td className="px-6 py-4 whitespace-nowrap text-right">
+        {read_today ? (
+          <span className="inline-flex items-center space-x-1.5 space-x-reverse px-2.5 py-1 rounded-full text-xs font-semibold bg-green-50 text-success border border-success/20">
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            <span>قرأ اليوم</span>
+          </span>
+        ) : (
+          <span className="inline-flex items-center space-x-1.5 space-x-reverse px-2.5 py-1 rounded-full text-xs font-semibold bg-red-50 text-danger border border-danger/20">
+            <XCircle className="w-3.5 h-3.5" />
+            <span>لم يقرأ</span>
+          </span>
+        )}
+      </td>
+
+    </tr>
+  )
+}

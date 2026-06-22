@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base rules */
+body {
+  font-family: 'Noto Naskh Arabic', sans-serif;
+  background-color: #F8F7F4;
+  color: #2C2C2A;
+}
+
+/* Custom PDF viewer rendering styles to handle responsiveness and standard shadows */
+.pdf-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  overflow-x: auto;
+  padding: 1rem 0;
+}
+
+.react-pdf__Document {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.react-pdf__Page {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+  border: 0.5px solid #E0DED6;
+  border-radius: 10px;
+  overflow: hidden;
+  max-width: 100%;
+  background: white;
+}
+
+.react-pdf__Page canvas {
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+/* Glassmorphism utility for login/card panels */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 0.5px solid rgba(224, 222, 214, 0.5);
+}
