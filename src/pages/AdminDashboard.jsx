@@ -160,8 +160,8 @@ const MemberChartPanel = ({ member }) => {
           )}
           {member.current_book_title && member.total_pages > 0 && (
             <div className="mt-1.5 max-w-[200px] mr-auto">
-              <ProgressBar progress={(member.last_page / member.total_pages) * 100} showLabel={false} size="sm" />
-              <span className="text-[10px] text-textSecondary">{Math.round((member.last_page / member.total_pages) * 100)}%</span>
+              <ProgressBar progress={Math.min(100, (member.last_page / member.total_pages) * 100)} showLabel={false} size="sm" />
+              <span className="text-[10px] text-textSecondary">{Math.min(100, Math.round((member.last_page / member.total_pages) * 100))}%</span>
             </div>
           )}
         </div>

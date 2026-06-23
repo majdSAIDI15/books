@@ -41,7 +41,8 @@ export const MemberRow = ({ member }) => {
   const { name, email, current_book_title, last_page, total_pages, read_today } = member
 
   // Calculate percentage progress safely
-  const progressPercent = total_pages > 0 ? (last_page / total_pages) * 100 : 0
+  const progressPercent = total_pages > 0 ? Math.min(100, (last_page / total_pages) * 100) : 0
+
 
   const getInitials = (name) => {
     if (!name) return 'م'

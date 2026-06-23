@@ -18,7 +18,9 @@ export const PDFReader = () => {
   const [currentPage, setCurrentPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [pdfLoading, setPdfLoading] = useState(true)
+  const [loadProgress, setLoadProgress] = useState(0)
   const [error, setError] = useState('')
+
 
   // State to track session progress
   const initialPageRef = useRef(1)
@@ -27,6 +29,8 @@ export const PDFReader = () => {
   const currentPageRef = useRef(1)
   const hasScrolledRef = useRef(false)
   const observerRef = useRef(null)
+  const saveTimeoutRef = useRef(null)
+  const pendingSaveRef = useRef(false)
 
   // Responsive page width state
   const [pageWidth, setPageWidth] = useState(window.innerWidth > 768 ? 650 : window.innerWidth - 32)
@@ -123,14 +127,46 @@ export const PDFReader = () => {
     loadBookAndSession()
   }, [user, bookId])
 
+  // Save on unmount / component cleanup
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current)
+      }
+      if (pendingSaveRef.current) {
+        const maxReached = maxPageReachedRef.current
+        const todayStr = getLocalDateStr()
+        const pagesReadToday = Math.max(alreadyReadTodayRef.current, maxReached)
+
+        supabase.from('reading_sessions').upsert({
+          user_id: user.id,
+          book_id: bookId,
+          last_page: maxReached,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id,book_id' }).then(({ error }) => {
+          if (error) console.error('Error saving reading session on unmount:', error.message)
+        })
+
+        supabase.from('daily_logs').upsert({
+          user_id: user.id,
+          book_id: bookId,
+          pages_read: pagesReadToday,
+          date: todayStr
+        }, { onConflict: 'user_id,book_id,date' }).then(({ error }) => {
+          if (error) console.error('Error saving daily log on unmount:', error.message)
+        })
+      }
+    }
+  }, [user, bookId])
+
   // Save on tab close / reload (unload keepalive)
   useEffect(() => {
     const handleBeforeUnload = () => {
       if (!user || !bookId) return
       
       const todayStr = getLocalDateStr()
-      const currentPageNum = currentPageRef.current
-      const pagesReadToday = Math.max(alreadyReadTodayRef.current, currentPageNum)
+      const maxReached = maxPageReachedRef.current
+      const pagesReadToday = Math.max(alreadyReadTodayRef.current, maxReached)
 
       const headers = {
         'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
@@ -145,7 +181,7 @@ export const PDFReader = () => {
         body: JSON.stringify({
           user_id: user.id,
           book_id: bookId,
-          last_page: currentPageNum,
+          last_page: maxReached,
           updated_at: new Date().toISOString()
         }),
         keepalive: true
@@ -171,17 +207,12 @@ export const PDFReader = () => {
     }
   }, [user, bookId])
 
-  // Track page change and save progress to Supabase
-  const handlePageChange = async (newPage) => {
-    if (!user || !bookId || newPage < 1 || (numPages && newPage > numPages)) return
-
-    setCurrentPage(newPage)
-    currentPageRef.current = newPage
-    maxPageReachedRef.current = Math.max(maxPageReachedRef.current, newPage)
+  const saveProgressToDatabase = async () => {
+    if (!user || !bookId) return
+    const maxReached = maxPageReachedRef.current
+    const todayStr = getLocalDateStr()
 
     try {
-      const todayStr = getLocalDateStr()
-
       // 1. Save Reading Session (last read page)
       const { error: sessionErr } = await supabase
         .from('reading_sessions')
@@ -189,7 +220,7 @@ export const PDFReader = () => {
           {
             user_id: user.id,
             book_id: bookId,
-            last_page: newPage,
+            last_page: maxReached,
             updated_at: new Date().toISOString()
           },
           { onConflict: 'user_id,book_id' }
@@ -197,8 +228,8 @@ export const PDFReader = () => {
       
       if (sessionErr) throw sessionErr
 
-      // 2. Save Daily Log progress (set pages_read = max(pages_read, currentPage))
-      const pagesReadToday = Math.max(alreadyReadTodayRef.current, newPage)
+      // 2. Save Daily Log progress (set pages_read = max(pages_read, maxReached))
+      const pagesReadToday = Math.max(alreadyReadTodayRef.current, maxReached)
       
       const { error: logErr } = await supabase
         .from('daily_logs')
@@ -215,12 +246,36 @@ export const PDFReader = () => {
       if (logErr) throw logErr
       
       alreadyReadTodayRef.current = pagesReadToday
+      pendingSaveRef.current = false
 
       // Show Arabic Save success toast briefly
       setShowToast(true)
 
     } catch (err) {
-      console.error('Error auto-saving reading progress:', err.message)
+      console.error('Error saving reading progress:', err.message)
+    }
+  }
+
+  // Track page change and save progress to Supabase after 3 seconds stay
+  const handlePageChange = async (newPage) => {
+    if (!user || !bookId || newPage < 1 || (numPages && newPage > numPages)) return
+
+    setCurrentPage(newPage)
+    currentPageRef.current = newPage
+    
+    // Only update maxPageReachedRef and set pending save if it's a new high page
+    if (newPage > maxPageReachedRef.current) {
+      maxPageReachedRef.current = newPage
+      pendingSaveRef.current = true
+      
+      // Debounce database write for 3 seconds
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current)
+      }
+      
+      saveTimeoutRef.current = setTimeout(() => {
+        saveProgressToDatabase()
+      }, 3000)
     }
   }
 
@@ -236,6 +291,9 @@ export const PDFReader = () => {
         .eq('id', book.id)
         .then(({ error }) => {
           if (error) console.error('Failed to sync book total pages:', error.message)
+          else {
+            setBook(prev => prev ? { ...prev, total_pages: numPages } : null)
+          }
         })
     }
   }
@@ -368,7 +426,14 @@ export const PDFReader = () => {
           {pdfLoading && (
             <div className="flex flex-col items-center space-y-3 py-20">
               <RefreshCw className="w-10 h-10 text-primary animate-spin" />
-              <p className="text-sm text-textSecondary font-semibold">جاري معالجة وعرض صفحات الكتاب...</p>
+              <p className="text-sm text-textSecondary font-semibold animate-pulse">
+                جاري تحميل الكتاب... {loadProgress > 0 ? `${loadProgress}%` : ''}
+              </p>
+              {loadProgress > 0 && (
+                <div className="w-48 bg-primary-light rounded-full h-1.5 overflow-hidden">
+                  <div className="bg-primary h-1.5 transition-all duration-300" style={{ width: `${loadProgress}%` }}></div>
+                </div>
+              )}
             </div>
           )}
 
@@ -376,6 +441,11 @@ export const PDFReader = () => {
             <Document
               file={book.pdf_url}
               onLoadSuccess={onDocumentLoadSuccess}
+              onLoadProgress={({ loaded, total }) => {
+                if (total > 0) {
+                  setLoadProgress(Math.round((loaded / total) * 100))
+                }
+              }}
               loading=""
               error={
                 <div className="text-center py-8 text-danger font-semibold bg-white border border-cardBorder rounded-custom p-6">
@@ -383,21 +453,42 @@ export const PDFReader = () => {
                 </div>
               }
             >
-              {Array.from(new Array(numPages), (el, index) => (
-                <div 
-                  key={index} 
-                  data-page-number={index + 1} 
-                  className="page-wrapper flex justify-center w-full my-3"
-                >
-                  <Page 
-                    pageNumber={index + 1} 
-                    width={pageWidth} 
-                    renderTextLayer={false} 
-                    renderAnnotationLayer={false}
-                    onRenderSuccess={() => onPageRenderSuccess(index + 1)}
-                  />
-                </div>
-              ))}
+              {Array.from(new Array(numPages), (el, index) => {
+                const pageNum = index + 1
+                const isNear = Math.abs(pageNum - currentPage) <= 2
+                const estimatedHeight = pageWidth * 1.414
+
+                return (
+                  <div 
+                    key={index} 
+                    data-page-number={pageNum} 
+                    className="page-wrapper flex justify-center w-full my-3"
+                    style={{ minHeight: isNear ? 'auto' : `${estimatedHeight}px` }}
+                  >
+                    {isNear ? (
+                      <Page 
+                        pageNumber={pageNum} 
+                        width={pageWidth} 
+                        renderTextLayer={false} 
+                        renderAnnotationLayer={false}
+                        onRenderSuccess={() => onPageRenderSuccess(pageNum)}
+                        loading={
+                          <div className="flex flex-col items-center justify-center bg-white border border-cardBorder rounded-custom animate-pulse shadow-sm" style={{ width: `${pageWidth}px`, height: `${estimatedHeight}px` }}>
+                            <div className="w-8 h-8 border-2 border-primary-light border-t-primary rounded-full animate-spin"></div>
+                          </div>
+                        }
+                      />
+                    ) : (
+                      <div 
+                        className="flex flex-col items-center justify-center bg-[#F8F7F4]/40 border border-dashed border-cardBorder/30 rounded-custom transition-all duration-200" 
+                        style={{ width: `${pageWidth}px`, height: `${estimatedHeight}px` }}
+                      >
+                        <span className="text-xs text-textSecondary/40 font-semibold">صفحة {pageNum}</span>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </Document>
           </div>
 
