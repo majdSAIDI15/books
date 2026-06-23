@@ -1,6 +1,41 @@
 import React from 'react'
 import { ProgressBar } from './ProgressBar'
-import { CheckCircle2, XCircle, BookOpen } from 'lucide-react'
+import { CheckCircle2, XCircle, BookOpen, Flame } from 'lucide-react'
+
+const getLocalDateStr = (offsetDays = 0) => {
+  const d = new Date()
+  d.setDate(d.getDate() - offsetDays)
+  const offset = d.getTimezoneOffset()
+  const local = new Date(d.getTime() - offset * 60000)
+  return local.toISOString().split('T')[0]
+}
+
+const getLastReadInfo = (logs) => {
+  const readLogs = (logs || []).filter(l => l.pages_read > 0)
+  if (readLogs.length === 0) {
+    return { lastDate: null, daysSince: Infinity }
+  }
+  const lastLog = readLogs[readLogs.length - 1]
+  const lastDateStr = lastLog.date
+  
+  const today = new Date(getLocalDateStr(0))
+  const lastReadDate = new Date(lastDateStr)
+  const diffTime = today - lastReadDate
+  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24))
+  
+  return { lastDate: lastDateStr, daysSince: diffDays }
+}
+
+const getFlameIndicator = (logs, readToday) => {
+  if (readToday) {
+    return { colorClass: 'text-success fill-success', tooltip: 'قرأ اليوم' }
+  }
+  const { daysSince } = getLastReadInfo(logs)
+  if (daysSince === 1) {
+    return { colorClass: 'text-orange-500 fill-orange-500', tooltip: 'فات يوم واحد' }
+  }
+  return { colorClass: 'text-danger fill-danger', tooltip: 'لم يقرأ منذ يومين أو أكثر' }
+}
 
 export const MemberRow = ({ member }) => {
   const { name, email, current_book_title, last_page, total_pages, read_today } = member
@@ -23,7 +58,13 @@ export const MemberRow = ({ member }) => {
             {getInitials(name)}
           </div>
           <div className="text-right">
-            <div className="text-sm font-semibold text-textPrimary">{name || 'قارئ مجهول'}</div>
+            <div className="flex items-center space-x-1.5 space-x-reverse justify-start">
+              <div className="text-sm font-semibold text-textPrimary">{name || 'قارئ مجهول'}</div>
+              {(() => {
+                const { colorClass, tooltip } = getFlameIndicator(member.logs, read_today)
+                return <Flame className={`w-4 h-4 ${colorClass}`} title={tooltip} />
+              })()}
+            </div>
             <div className="text-xs text-textSecondary">{email}</div>
           </div>
         </div>

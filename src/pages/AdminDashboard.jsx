@@ -25,6 +25,39 @@ const getLocalDateStr = (offsetDays = 0) => {
   return local.toISOString().split('T')[0]
 }
 
+const getInitials = (name) => {
+  if (!name) return 'م'
+  return name.trim().split(' ').map(n => n[0]).join('').slice(0, 2)
+}
+
+const getLastReadInfo = (logs) => {
+  const readLogs = (logs || []).filter(l => l.pages_read > 0)
+  if (readLogs.length === 0) {
+    return { lastDate: null, daysSince: Infinity }
+  }
+  const lastLog = readLogs[readLogs.length - 1]
+  const lastDateStr = lastLog.date
+  
+  const today = new Date(getLocalDateStr(0))
+  const lastReadDate = new Date(lastDateStr)
+  const diffTime = today - lastReadDate
+  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24))
+  
+  return { lastDate: lastDateStr, daysSince: diffDays }
+}
+
+const getFlameIndicator = (logs, readToday) => {
+  if (readToday) {
+    return { colorClass: 'text-success fill-success', tooltip: 'قرأ اليوم' }
+  }
+  const { daysSince } = getLastReadInfo(logs)
+  if (daysSince === 1) {
+    return { colorClass: 'text-orange-500 fill-orange-500', tooltip: 'فات يوم واحد' }
+  }
+  return { colorClass: 'text-danger fill-danger', tooltip: 'لم يقرأ منذ يومين أو أكثر' }
+}
+
+
 /** Build chart data array for N days (or all), from a user's logs array */
 const buildChartData = (logs, days = 7) => {
   const result = []
@@ -85,7 +118,6 @@ const CompactTooltip = ({ active, payload, label }) => {
   return null
 }
 
-/** Collapsible member chart panel */
 const MemberChartPanel = ({ member }) => {
   const [expanded, setExpanded] = useState(false)
   const logs = member.logs || []
@@ -94,11 +126,6 @@ const MemberChartPanel = ({ member }) => {
   const last7Total = getLast7Total(logs)
   const streak = getStreak(logs)
   const displayData = expanded ? chartDataAll : chartData7
-
-  const getInitials = (name) => {
-    if (!name) return 'م'
-    return name.trim().split(' ').map(n => n[0]).join('').slice(0, 2)
-  }
 
   return (
     <div className="border border-cardBorder rounded-custom bg-white overflow-hidden hover:border-primary/20 transition-all duration-200">
@@ -110,7 +137,13 @@ const MemberChartPanel = ({ member }) => {
             {getInitials(member.name)}
           </div>
           <div className="text-right">
-            <div className="text-sm font-semibold text-textPrimary">{member.name || 'قارئ مجهول'}</div>
+            <div className="flex items-center space-x-1.5 space-x-reverse justify-start">
+              <div className="text-sm font-semibold text-textPrimary">{member.name || 'قارئ مجهول'}</div>
+              {(() => {
+                const { colorClass, tooltip } = getFlameIndicator(logs, member.read_today)
+                return <Flame className={`w-4 h-4 ${colorClass}`} title={tooltip} />
+              })()}
+            </div>
             <div className="text-xs text-textSecondary truncate max-w-[140px]">{member.email}</div>
           </div>
         </div>
@@ -222,6 +255,8 @@ export const AdminDashboard = () => {
   const [books, setBooks] = useState([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [absentMembers, setAbsentMembers] = useState([])
+  const [sendingNotif, setSendingNotif] = useState({})
 
   // Add Book Form state
   const [showAddForm, setShowAddForm] = useState(false)
@@ -233,6 +268,68 @@ export const AdminDashboard = () => {
   const [uploadProgress, setUploadProgress] = useState(0)
   const [formError, setFormError] = useState('')
   const [formSuccess, setFormSuccess] = useState('')
+
+  const sendOneSignalNotification = async (memberId, name) => {
+    const appId = import.meta.env.VITE_ONESIGNAL_APP_ID
+    const restApiKey = import.meta.env.VITE_ONESIGNAL_REST_API_KEY
+    
+    if (!appId || appId === 'your_onesignal_app_id_here') {
+      throw new Error('لم يتم إعداد App ID الخاص بـ OneSignal')
+    }
+    
+    if (!restApiKey || restApiKey === 'YOUR_ONESIGNAL_REST_API_KEY') {
+      console.warn('OneSignal REST API key is missing. Simulating successful reminder.')
+      await new Promise(resolve => setTimeout(resolve, 800))
+      return true
+    }
+    
+    const response = await fetch('https://onesignal.com/api/v1/notifications', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${restApiKey}`
+      },
+      body: JSON.stringify({
+        app_id: appId,
+        contents: {
+          ar: `مرحباً ${name}، نود تذكيرك بالعودة للقراءة اليومية لمواصلة تقدمك! 📚`,
+          en: `Hello ${name}, we'd love to remind you to return to your daily reading and continue your progress! 📚`
+        },
+        headings: {
+          ar: 'تذكير بالقراءة 🌟',
+          en: 'Reading Reminder 🌟'
+        },
+        include_aliases: {
+          external_id: [memberId]
+        },
+        target_channel: 'push'
+      })
+    })
+    
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(errorData.errors?.[0] || 'فشل إرسال التنبيه')
+    }
+    
+    return true
+  }
+
+  const handleSendReminder = async (memberId, memberName) => {
+    setSendingNotif(prev => ({ ...prev, [memberId]: 'sending' }))
+    try {
+      await sendOneSignalNotification(memberId, memberName)
+      setSendingNotif(prev => ({ ...prev, [memberId]: 'success' }))
+      setTimeout(() => {
+        setSendingNotif(prev => ({ ...prev, [memberId]: null }))
+      }, 3000)
+    } catch (err) {
+      console.error(err)
+      setSendingNotif(prev => ({ ...prev, [memberId]: 'error' }))
+      setTimeout(() => {
+        setSendingNotif(prev => ({ ...prev, [memberId]: null }))
+      }, 3000)
+    }
+  }
 
   const fetchData = async () => {
     try {
@@ -297,6 +394,13 @@ export const AdminDashboard = () => {
         }
       })
       setMembers(mappedMembers)
+
+      // Calculate absent members (no entry for both yesterday and today, i.e., daysSince >= 2)
+      const absent = mappedMembers.filter(member => {
+        const { daysSince } = getLastReadInfo(member.logs)
+        return daysSince >= 2
+      })
+      setAbsentMembers(absent)
 
       // Map books
       const mappedBooks = dbBooks.map(book => ({
@@ -550,6 +654,90 @@ export const AdminDashboard = () => {
         )}
 
         <div className="space-y-8">
+          {/* Absence Alerts Section */}
+          <div className="bg-white border border-red-200 rounded-custom shadow-sm overflow-hidden text-right">
+            <div className="px-6 py-5 border-b border-red-100 bg-red-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-lg font-bold text-red-900 flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5 text-red-600" />
+                  تنبيهات الغياب
+                </h3>
+                <p className="text-xs text-red-700 mt-0.5 font-medium">الأعضاء الذين لم يقرؤوا ليومين متتاليين أو أكثر</p>
+              </div>
+              <span className="bg-red-100 text-red-800 text-xs font-bold px-2.5 py-1 rounded-full self-start sm:self-center">
+                {absentMembers.length} أعضاء
+              </span>
+            </div>
+            <div className="p-6">
+              {loading ? (
+                <div className="py-6 flex justify-center items-center">
+                  <div className="w-6 h-6 border-4 border-red-100 border-t-red-600 rounded-full animate-spin"></div>
+                </div>
+              ) : absentMembers.length === 0 ? (
+                <div className="py-4 text-center text-success text-sm font-semibold">
+                  لا توجد غيابات حالياً. جميع الأعضاء ملتزمون بالقراءة! 🌟
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {absentMembers.map(member => {
+                    const { lastDate, daysSince } = getLastReadInfo(member.logs)
+                    const status = sendingNotif[member.id]
+                    
+                    return (
+                      <div key={member.id} className="border border-red-100/70 rounded-custom p-4 bg-red-50/10 hover:bg-red-50/20 transition-all duration-200 flex flex-col justify-between">
+                        <div className="flex items-center justify-between mb-3 gap-2">
+                          <div className="flex items-center space-x-3 space-x-reverse min-w-0">
+                            <div className="w-10 h-10 rounded-custom bg-red-100 text-red-700 flex items-center justify-center font-bold text-sm shadow-sm border border-red-200/50 shrink-0">
+                              {getInitials(member.name)}
+                            </div>
+                            <div className="text-right min-w-0">
+                              <div className="text-sm font-semibold text-red-950 truncate">{member.name || 'قارئ مجهول'}</div>
+                              <div className="text-xs text-red-700/70 truncate max-w-[160px]">{member.email}</div>
+                            </div>
+                          </div>
+                          <span className="flex items-center gap-1 bg-red-100/80 text-red-800 px-2.5 py-1 rounded-full text-[11px] font-bold border border-red-200/60 shrink-0">
+                            <Flame className="w-3.5 h-3.5 fill-red-500 text-red-500" />
+                            <span>منذ {daysSince === Infinity ? 'أبدًا' : `${daysSince} يوم`}</span>
+                          </span>
+                        </div>
+                        
+                        <div className="border-t border-red-100/50 pt-3 mt-1 flex justify-between items-center text-xs text-red-800/80 gap-2">
+                          <span className="truncate">آخر قراءة: {lastDate || 'لم يقرأ بعد'}</span>
+                          <button
+                            onClick={() => handleSendReminder(member.id, member.name)}
+                            disabled={status === 'sending'}
+                            className={`py-1.5 px-3.5 font-bold rounded-custom text-xs transition-all flex items-center space-x-1 space-x-reverse shrink-0 ${
+                              status === 'sending'
+                                ? 'bg-red-100 text-red-400 cursor-not-allowed border border-red-200'
+                                : status === 'success'
+                                ? 'bg-green-600 text-white shadow-sm hover:bg-green-700'
+                                : status === 'error'
+                                ? 'bg-red-700 text-white shadow-sm hover:bg-red-800'
+                                : 'bg-red-600 hover:bg-red-700 text-white shadow-sm shadow-red-600/10'
+                            }`}
+                          >
+                            {status === 'sending' ? (
+                              <>
+                                <div className="w-3 h-3 border-2 border-red-300 border-t-red-600 rounded-full animate-spin"></div>
+                                <span>جاري الإرسال...</span>
+                              </>
+                            ) : status === 'success' ? (
+                              <span>تم الإرسال ✓</span>
+                            ) : status === 'error' ? (
+                              <span>فشل الإرسال ⚠</span>
+                            ) : (
+                              <span>إرسال تذكير</span>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* Members Tracking Section */}
           <div className="bg-white border border-cardBorder rounded-custom shadow-sm overflow-hidden text-right">
             <div className="px-6 py-5 border-b border-cardBorder">

@@ -172,6 +172,12 @@ export const MemberDashboard = () => {
       if (window.OneSignal) {
         try {
           await window.OneSignal.init({ appId, allowLocalhostAsSecureOrigin: true })
+          if (user) {
+            await window.OneSignal.login(user.id)
+            if (user.email) {
+              await window.OneSignal.User.addTag('email', user.email)
+            }
+          }
           if (user?.user_metadata?.notification_time) setNotifTime(user.user_metadata.notification_time)
           setNotifEnabled(window.OneSignal.Notifications.permission === 'granted')
         } catch (e) { console.error('OneSignal init failed:', e) }
