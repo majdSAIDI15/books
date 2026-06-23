@@ -5,9 +5,99 @@ import { useAuth } from '../context/AuthContext'
 import { Navbar } from '../components/Navbar'
 import { BookCard } from '../components/BookCard'
 import { ProgressBar } from '../components/ProgressBar'
-import { 
-  BookOpen, Clock, Settings, Bell, BellOff, CheckCircle2, ChevronDown, ChevronUp, AlertCircle
+import {
+  BookOpen, Clock, Settings, Bell, BellOff, CheckCircle2, ChevronDown, ChevronUp, AlertCircle, Flame, TrendingUp
 } from 'lucide-react'
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell
+} from 'recharts'
+
+// ─── Date / Chart helpers ─────────────────────────────────────────────────────
+
+const ARABIC_DAYS = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت']
+
+const getLocalDateStr = (offsetDays = 0) => {
+  const d = new Date()
+  d.setDate(d.getDate() - offsetDays)
+  const offset = d.getTimezoneOffset()
+  const local = new Date(d.getTime() - offset * 60000)
+  return local.toISOString().split('T')[0]
+}
+
+/** Build chart data for the chosen range from all logs */
+const buildChartData = (logs, range) => {
+  if (range === 'all') {
+    if (!logs.length) return []
+    // Sort ascending
+    const sorted = [...logs].sort((a, b) => a.date.localeCompare(b.date))
+    const earliest = sorted[0].date
+    const today = getLocalDateStr()
+    const days = []
+    let cur = new Date(earliest)
+    const end = new Date(today)
+    while (cur <= end) {
+      const dateStr = cur.toISOString().split('T')[0]
+      const log = logs.find(l => l.date === dateStr)
+      days.push({
+        date: dateStr,
+        day: ARABIC_DAYS[cur.getDay()],
+        pages: log ? log.pages_read : 0
+      })
+      cur.setDate(cur.getDate() + 1)
+    }
+    return days
+  }
+
+  const n = range === '7' ? 7 : 30
+  const result = []
+  for (let i = n - 1; i >= 0; i--) {
+    const dateStr = getLocalDateStr(i)
+    const log = logs.find(l => l.date === dateStr)
+    result.push({
+      date: dateStr,
+      day: ARABIC_DAYS[new Date(dateStr).getDay()],
+      pages: log ? log.pages_read : 0
+    })
+  }
+  return result
+}
+
+/** Total pages in last 7 days */
+const getLast7Total = (logs) => {
+  let total = 0
+  for (let i = 0; i < 7; i++) {
+    const log = logs.find(l => l.date === getLocalDateStr(i))
+    if (log) total += log.pages_read
+  }
+  return total
+}
+
+/** Consecutive day streak from today backwards */
+const getStreak = (logs) => {
+  let streak = 0
+  let i = 0
+  while (true) {
+    const log = logs.find(l => l.date === getLocalDateStr(i))
+    if (log && log.pages_read > 0) { streak++; i++ } else break
+  }
+  return streak
+}
+
+// ─── Custom BarChart Tooltip ──────────────────────────────────────────────────
+
+const BarTooltip = ({ active, payload, label }) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="bg-white border border-cardBorder rounded-custom px-3 py-2 text-xs shadow-lg text-right">
+        <p className="font-bold text-textPrimary mb-0.5">{label}</p>
+        <p className="text-primary font-semibold">{payload[0].value} صفحة</p>
+      </div>
+    )
+  }
+  return null
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export const MemberDashboard = () => {
   const { user, profile } = useAuth()
@@ -16,8 +106,12 @@ export const MemberDashboard = () => {
   const [loading, setLoading] = useState(true)
   const [books, setBooks] = useState([])
   const [sessions, setSessions] = useState([])
+  const [allLogs, setAllLogs] = useState([])
   const [hasReadToday, setHasReadToday] = useState(false)
   const [selectedCategory, setSelectedCategory] = useState('الكل')
+
+  // Chart range: '7' | '30' | 'all'
+  const [chartRange, setChartRange] = useState('7')
 
   // Notification states
   const [showSettings, setShowSettings] = useState(false)
@@ -26,45 +120,39 @@ export const MemberDashboard = () => {
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [settingsMessage, setSettingsMessage] = useState('')
 
-  const getLocalDateStr = () => {
-    const d = new Date()
-    const offset = d.getTimezoneOffset()
-    const localDate = new Date(d.getTime() - (offset * 60 * 1000))
-    return localDate.toISOString().split('T')[0]
-  }
+  const getLocalDateStrFn = () => getLocalDateStr(0)
 
-  // Fetch Member Dashboard Data
+  // ── Fetch ────────────────────────────────────────────────────────────────────
+
   const fetchData = async () => {
     if (!user) return
     try {
       setLoading(true)
-      const todayStr = getLocalDateStr()
+      const todayStr = getLocalDateStrFn()
 
-      // 1. Fetch all books
-      const { data: dbBooks, error: booksErr } = await supabase
-        .from('books')
-        .select('*')
+      // All books
+      const { data: dbBooks, error: booksErr } = await supabase.from('books').select('*')
       if (booksErr) throw booksErr
       setBooks(dbBooks || [])
 
-      // 2. Fetch active reading sessions for current user
+      // Reading sessions for current user
       const { data: dbSessions, error: sessionsErr } = await supabase
-        .from('reading_sessions')
-        .select('*')
-        .eq('user_id', user.id)
+        .from('reading_sessions').select('*').eq('user_id', user.id)
       if (sessionsErr) throw sessionsErr
       setSessions(dbSessions || [])
 
-      // 3. Check if user read today (daily log exists)
+      // ALL daily_logs for current user (no date filter)
       const { data: dbLogs, error: logsErr } = await supabase
         .from('daily_logs')
-        .select('id')
+        .select('*')
         .eq('user_id', user.id)
-        .eq('date', todayStr)
-        .limit(1)
-      
+        .order('date', { ascending: true })
       if (logsErr) throw logsErr
-      setHasReadToday(dbLogs && dbLogs.length > 0)
+      setAllLogs(dbLogs || [])
+
+      // Check if read today
+      const readToday = (dbLogs || []).some(l => l.date === todayStr && l.pages_read > 0)
+      setHasReadToday(readToday)
 
     } catch (err) {
       console.error('Error fetching member dashboard data:', err)
@@ -73,99 +161,58 @@ export const MemberDashboard = () => {
     }
   }
 
-  useEffect(() => {
-    fetchData()
-  }, [user])
+  useEffect(() => { fetchData() }, [user])
 
-  // OneSignal initialization and permission query
+  // ── OneSignal ─────────────────────────────────────────────────────────────────
+
   useEffect(() => {
     const initOneSignal = async () => {
       const appId = import.meta.env.VITE_ONESIGNAL_APP_ID
-      if (!appId || appId === 'your_onesignal_app_id_here') {
-        console.warn('OneSignal App ID is not set.')
-        return
-      }
-
+      if (!appId || appId === 'your_onesignal_app_id_here') return
       if (window.OneSignal) {
         try {
-          await window.OneSignal.init({
-            appId: appId,
-            allowLocalhostAsSecureOrigin: true,
-          })
-
-          // Retrieve cached settings from metadata
-          if (user?.user_metadata?.notification_time) {
-            setNotifTime(user.user_metadata.notification_time)
-          }
-
-          // Check subscription status
-          const permission = window.OneSignal.Notifications.permission
-          setNotifEnabled(permission === 'granted')
-        } catch (e) {
-          console.error('Failed to initialize OneSignal:', e)
-        }
+          await window.OneSignal.init({ appId, allowLocalhostAsSecureOrigin: true })
+          if (user?.user_metadata?.notification_time) setNotifTime(user.user_metadata.notification_time)
+          setNotifEnabled(window.OneSignal.Notifications.permission === 'granted')
+        } catch (e) { console.error('OneSignal init failed:', e) }
       }
     }
-
     initOneSignal()
   }, [user])
 
-  // Toggle notification preference / request permission
   const handleToggleNotifications = async () => {
-    if (!window.OneSignal) {
-      alert('خدمة التنبيهات غير متوفرة حالياً')
-      return
-    }
-
+    if (!window.OneSignal) { alert('خدمة التنبيهات غير متوفرة حالياً'); return }
     try {
-      const permission = window.OneSignal.Notifications.permission
-      
-      if (permission !== 'granted') {
-        const isGranted = await window.OneSignal.Notifications.requestPermission()
-        setNotifEnabled(isGranted === 'granted' || window.OneSignal.Notifications.permission === 'granted')
+      if (window.OneSignal.Notifications.permission !== 'granted') {
+        await window.OneSignal.Notifications.requestPermission()
+        setNotifEnabled(window.OneSignal.Notifications.permission === 'granted')
       } else {
-        // OneSignal doesn't allow direct opt-out via API easily, so we tag or let them know
         alert('يمكنك تعطيل التنبيهات من إعدادات المتصفح الخاص بك.')
       }
-    } catch (e) {
-      console.error(e)
-    }
+    } catch (e) { console.error(e) }
   }
 
-  // Save Settings (Notification time preference)
   const handleSaveSettings = async (e) => {
     e.preventDefault()
     setSettingsLoading(true)
     setSettingsMessage('')
-
     try {
-      // 1. Update user metadata in Supabase Auth
-      const { error: authErr } = await supabase.auth.updateUser({
-        data: { notification_time: notifTime }
-      })
+      const { error: authErr } = await supabase.auth.updateUser({ data: { notification_time: notifTime } })
       if (authErr) throw authErr
-
-      // 2. Tag user in OneSignal so scheduled backend push can target them
-      if (window.OneSignal && window.OneSignal.User) {
-        await window.OneSignal.User.addTag('notification_time', notifTime)
-      }
-
+      if (window.OneSignal?.User) await window.OneSignal.User.addTag('notification_time', notifTime)
       setSettingsMessage('تم حفظ إعدادات التنبيهات بنجاح!')
       setTimeout(() => setSettingsMessage(''), 3000)
     } catch (err) {
-      console.error(err)
       setSettingsMessage('حدث خطأ أثناء حفظ الإعدادات.')
     } finally {
       setSettingsLoading(false)
     }
   }
 
-  // Handle book reading start/resume
-  const handleStartRead = (bookId) => {
-    navigate(`/member/read/${bookId}`)
-  }
+  // ── Derived values ────────────────────────────────────────────────────────────
 
-  // Get reading session for a book
+  const handleStartRead = (bookId) => navigate(`/member/read/${bookId}`)
+
   const getBookProgress = (bookId) => {
     const session = sessions.find(s => s.book_id === bookId)
     const book = books.find(b => b.id === bookId)
@@ -173,32 +220,35 @@ export const MemberDashboard = () => {
     return (session.last_page / book.total_pages) * 100
   }
 
-  // Dynamic categories computed from active books
   const dynamicCategories = ['الكل', ...new Set(books.map(b => b.category).filter(Boolean))]
-
-  // Filtered books list
-  const filteredBooks = selectedCategory === 'الكل'
-    ? books
-    : books.filter(b => b.category === selectedCategory)
-
-  // Active books (user started reading)
+  const filteredBooks = selectedCategory === 'الكل' ? books : books.filter(b => b.category === selectedCategory)
   const activeBooks = books.filter(book => {
-    const session = sessions.find(s => s.book_id === book.id)
-    return session && session.last_page > 0
+    const s = sessions.find(s => s.book_id === book.id)
+    return s && s.last_page > 0
   })
+
+  // Chart derived
+  const chartData = buildChartData(allLogs, chartRange)
+  const last7Total = getLast7Total(allLogs)
+  const streak = getStreak(allLogs)
+  const maxPages = Math.max(...chartData.map(d => d.pages), 1)
+
+  const RANGE_LABELS = { '7': 'آخر 7 أيام', '30': 'آخر 30 يوم', 'all': 'كل التاريخ' }
+
+  // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-bgMain text-right">
-      <Navbar 
-        title="مكتبتي" 
-        showNotificationBell={true} 
+      <Navbar
+        title="مكتبتي"
+        showNotificationBell={true}
         onBellClick={handleToggleNotifications}
         hasUnreadNotification={!notifEnabled}
       />
 
       <main className="max-w-6xl mx-auto px-4 py-8">
-        
-        {/* Daily Announcement Purple Banner */}
+
+        {/* Daily Banner */}
         {!hasReadToday && (
           <div className="bg-gradient-to-r from-primary to-indigo-600 text-white rounded-custom p-6 shadow-md mb-8 flex flex-col md:flex-row justify-between items-center gap-4 border border-primary/20">
             <div>
@@ -207,12 +257,8 @@ export const MemberDashboard = () => {
             </div>
             <button
               onClick={() => {
-                // If they have any book, go to the first one, or scroll to Library
-                if (activeBooks.length > 0) {
-                  navigate(`/member/read/${activeBooks[0].id}`)
-                } else {
-                  document.getElementById('library-section')?.scrollIntoView({ behavior: 'smooth' })
-                }
+                if (activeBooks.length > 0) navigate(`/member/read/${activeBooks[0].id}`)
+                else document.getElementById('library-section')?.scrollIntoView({ behavior: 'smooth' })
               }}
               className="py-2.5 px-6 bg-white text-primary font-bold rounded-custom hover:bg-primary-light hover:scale-105 transition-all text-sm shrink-0"
             >
@@ -221,17 +267,14 @@ export const MemberDashboard = () => {
           </div>
         )}
 
-        {/* Top Header Grid: Welcome + Notification Time Config */}
+        {/* Welcome + Notification Settings */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8 items-start">
-          
-          {/* Welcome Text */}
           <div className="lg:col-span-2">
             <h2 className="text-2xl font-bold text-textPrimary">أهلاً بك، {profile?.name || user?.email}</h2>
             <p className="text-sm text-textSecondary font-semibold mt-1">تتبع تقدمك، أكمل كتبك، وحقق أهدافك القرائية اليومية.</p>
           </div>
 
-          {/* Quick Settings: Notification scheduling */}
-          <div className="bg-white border border-cardBorder rounded-custom shadow-sm overflow-hidden transition-all duration-300">
+          <div className="bg-white border border-cardBorder rounded-custom shadow-sm overflow-hidden">
             <button
               onClick={() => setShowSettings(!showSettings)}
               className="w-full px-5 py-4 flex items-center justify-between text-textPrimary hover:bg-[#F8F7F4]/30"
@@ -244,69 +287,44 @@ export const MemberDashboard = () => {
             </button>
 
             {showSettings && (
-              <div className="px-5 pb-5 border-t border-cardBorder/60 pt-4 animate-slideDown">
+              <div className="px-5 pb-5 border-t border-cardBorder/60 pt-4">
                 {settingsMessage && (
-                  <div className={`mb-3 text-xs font-semibold px-3 py-2 rounded-custom border flex items-center space-x-2 space-x-reverse ${
-                    settingsMessage.includes('بنجاح') 
-                      ? 'bg-green-50 text-success border-success/20' 
-                      : 'bg-red-50 text-danger border-danger/20'
-                  }`}>
+                  <div className={`mb-3 text-xs font-semibold px-3 py-2 rounded-custom border flex items-center space-x-2 space-x-reverse ${settingsMessage.includes('بنجاح') ? 'bg-green-50 text-success border-success/20' : 'bg-red-50 text-danger border-danger/20'}`}>
                     {settingsMessage.includes('بنجاح') ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
                     <span>{settingsMessage}</span>
                   </div>
                 )}
-                
                 <form onSubmit={handleSaveSettings} className="space-y-4">
                   <div className="flex items-center justify-between text-xs font-semibold text-textSecondary">
                     <span>حالة الاشتراك:</span>
                     {notifEnabled ? (
-                      <span className="text-success flex items-center space-x-1 space-x-reverse">
-                        <Bell className="w-3.5 h-3.5" />
-                        <span>نشط</span>
-                      </span>
+                      <span className="text-success flex items-center space-x-1 space-x-reverse"><Bell className="w-3.5 h-3.5" /><span>نشط</span></span>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={handleToggleNotifications}
-                        className="text-primary hover:underline flex items-center space-x-1 space-x-reverse"
-                      >
-                        <BellOff className="w-3.5 h-3.5" />
-                        <span>تفعيل التنبيهات</span>
+                      <button type="button" onClick={handleToggleNotifications} className="text-primary hover:underline flex items-center space-x-1 space-x-reverse">
+                        <BellOff className="w-3.5 h-3.5" /><span>تفعيل التنبيهات</span>
                       </button>
                     )}
                   </div>
-
                   <div>
                     <label className="text-xs font-bold text-textPrimary block mb-1">وقت التنبيه اليومي</label>
                     <div className="relative">
-                      <span className="absolute inset-y-0 right-0 pr-3 flex items-center text-textSecondary pointer-events-none">
-                        <Clock className="w-4 h-4" />
-                      </span>
-                      <input
-                        type="time"
-                        value={notifTime}
-                        onChange={(e) => setNotifTime(e.target.value)}
-                        className="w-full pr-10 pl-4 py-2 bg-[#F8F7F4]/50 border border-cardBorder rounded-custom text-sm focus:outline-none focus:border-primary text-right"
-                      />
+                      <span className="absolute inset-y-0 right-0 pr-3 flex items-center text-textSecondary pointer-events-none"><Clock className="w-4 h-4" /></span>
+                      <input type="time" value={notifTime} onChange={e => setNotifTime(e.target.value)}
+                        className="w-full pr-10 pl-4 py-2 bg-[#F8F7F4]/50 border border-cardBorder rounded-custom text-sm focus:outline-none focus:border-primary text-right" />
                     </div>
                     <span className="text-[10px] text-textSecondary mt-1 block">تنبيه يومي يذكرك بالقراءة لمتابعة وردك اليومي</span>
                   </div>
-
-                  <button
-                    type="submit"
-                    disabled={settingsLoading}
-                    className="w-full py-2 bg-primary hover:bg-primary/95 text-white font-bold rounded-custom text-xs shadow-sm shadow-primary/20 disabled:opacity-50"
-                  >
+                  <button type="submit" disabled={settingsLoading}
+                    className="w-full py-2 bg-primary hover:bg-primary/95 text-white font-bold rounded-custom text-xs shadow-sm shadow-primary/20 disabled:opacity-50">
                     {settingsLoading ? 'جاري الحفظ...' : 'حفظ التفضيلات'}
                   </button>
                 </form>
               </div>
             )}
           </div>
-
         </div>
 
-        {/* My Progress Section (Horizontal active list) */}
+        {/* Active Books Progress */}
         {activeBooks.length > 0 && (
           <div className="bg-white border border-cardBorder rounded-custom shadow-sm p-6 mb-8 text-right">
             <h3 className="text-lg font-bold text-textPrimary mb-4">كتبي النشطة</h3>
@@ -317,10 +335,8 @@ export const MemberDashboard = () => {
                 return (
                   <div key={book.id} className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-4 border border-cardBorder/60 rounded-custom hover:border-primary/20 transition-colors gap-4">
                     <div className="flex items-center space-x-3 space-x-reverse max-w-md">
-                      <div 
-                        className="w-10 h-12 rounded-sm shrink-0 shadow-sm border border-black/10 relative overflow-hidden flex items-center justify-center"
-                        style={{ backgroundColor: book.cover_color || '#EEEDFE' }}
-                      >
+                      <div className="w-10 h-12 rounded-sm shrink-0 shadow-sm border border-black/10 relative overflow-hidden flex items-center justify-center"
+                        style={{ backgroundColor: book.cover_color || '#EEEDFE' }}>
                         <div className="absolute top-0 right-0 bottom-0 w-1 bg-black/10"></div>
                         <BookOpen className="w-5 h-5 text-primary/70" />
                       </div>
@@ -329,16 +345,11 @@ export const MemberDashboard = () => {
                         <span className="text-xs text-textSecondary mt-1 block font-medium">الصفحة {session?.last_page} من {book.total_pages}</span>
                       </div>
                     </div>
-
                     <div className="w-full sm:w-60 flex items-center space-x-4 space-x-reverse">
-                      <div className="flex-grow">
-                        <ProgressBar progress={pct} showLabel={false} size="sm" />
-                      </div>
+                      <div className="flex-grow"><ProgressBar progress={pct} showLabel={false} size="sm" /></div>
                       <span className="text-xs font-bold text-primary shrink-0">{Math.round(pct)}%</span>
-                      <button
-                        onClick={() => handleStartRead(book.id)}
-                        className="py-1.5 px-4 bg-primary text-white text-xs font-bold rounded-custom hover:bg-primary/90 transition-colors shrink-0 shadow-sm"
-                      >
+                      <button onClick={() => handleStartRead(book.id)}
+                        className="py-1.5 px-4 bg-primary text-white text-xs font-bold rounded-custom hover:bg-primary/90 transition-colors shrink-0 shadow-sm">
                         متابعة
                       </button>
                     </div>
@@ -349,33 +360,122 @@ export const MemberDashboard = () => {
           </div>
         )}
 
-        {/* Library Section */}
+        {/* ── Reading Activity Chart Card ────────────────────────────────────── */}
+        <div className="bg-white border border-cardBorder rounded-custom shadow-sm p-6 mb-8">
+
+          {/* Card header */}
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-5 gap-4">
+            <div className="text-right">
+              <h3 className="text-lg font-bold text-textPrimary">نشاطي القرائي</h3>
+              <p className="text-xs text-textSecondary mt-0.5 font-medium">عدد الصفحات المقروءة يومياً عبر الزمن</p>
+            </div>
+
+            {/* Range selector tabs */}
+            <div className="flex items-center gap-2">
+              {Object.entries(RANGE_LABELS).map(([key, label]) => (
+                <button key={key} onClick={() => setChartRange(key)}
+                  className={`px-3 py-1.5 rounded-custom text-xs font-bold transition-all border ${
+                    chartRange === key
+                      ? 'bg-primary text-white border-primary shadow-sm'
+                      : 'bg-white text-textSecondary border-cardBorder hover:text-primary hover:border-primary/30'
+                  }`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Summary pills */}
+          <div className="flex flex-wrap gap-3 mb-5">
+            <div className="flex items-center space-x-2 space-x-reverse bg-primary-light px-4 py-2 rounded-custom border border-primary/10">
+              <TrendingUp className="w-4 h-4 text-primary" />
+              <div className="text-right">
+                <div className="text-lg font-bold text-primary leading-none">{last7Total}</div>
+                <div className="text-[10px] text-textSecondary font-semibold mt-0.5">صفحة في آخر 7 أيام</div>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2 space-x-reverse bg-orange-50 px-4 py-2 rounded-custom border border-orange-200">
+              <Flame className="w-4 h-4 text-orange-500" />
+              <div className="text-right">
+                <div className="text-lg font-bold text-orange-600 leading-none">{streak}</div>
+                <div className="text-[10px] text-textSecondary font-semibold mt-0.5">
+                  {streak === 1 ? 'يوم متتالي' : 'أيام متتالية'}
+                </div>
+              </div>
+            </div>
+            {hasReadToday && (
+              <div className="flex items-center space-x-2 space-x-reverse bg-green-50 px-4 py-2 rounded-custom border border-success/20">
+                <CheckCircle2 className="w-4 h-4 text-success" />
+                <span className="text-xs font-bold text-success">قرأت اليوم ✓</span>
+              </div>
+            )}
+          </div>
+
+          {/* Bar Chart */}
+          {loading ? (
+            <div className="h-[200px] flex items-center justify-center">
+              <div className="w-8 h-8 border-4 border-primary-light border-t-primary rounded-full animate-spin"></div>
+            </div>
+          ) : chartData.length === 0 || chartData.every(d => d.pages === 0) ? (
+            <div className="h-[200px] flex flex-col items-center justify-center text-textSecondary">
+              <BookOpen className="w-12 h-12 text-primary/20 mb-3" />
+              <p className="text-sm font-semibold">لا يوجد سجل قراءة بعد</p>
+              <p className="text-xs mt-1 opacity-70">ابدأ القراءة لترى نشاطك هنا</p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={chartData} margin={{ top: 4, right: 4, left: -16, bottom: 0 }} barCategoryGap="30%">
+                <CartesianGrid strokeDasharray="3 3" stroke="#E0DED6" vertical={false} />
+                <XAxis
+                  dataKey="day"
+                  tick={{ fontSize: 10, fill: '#888780', fontFamily: 'Noto Naskh Arabic' }}
+                  axisLine={false}
+                  tickLine={false}
+                  interval={chartRange === 'all' && chartData.length > 30 ? Math.floor(chartData.length / 10) : 0}
+                />
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#888780' }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={28}
+                  allowDecimals={false}
+                />
+                <Tooltip content={<BarTooltip />} cursor={{ fill: 'rgba(83,74,183,0.06)' }} />
+                <Bar dataKey="pages" radius={[4, 4, 0, 0]}>
+                  {chartData.map((entry, index) => (
+                    <Cell
+                      key={index}
+                      fill={entry.pages > 0 ? '#534AB7' : '#E0DED6'}
+                      fillOpacity={entry.pages > 0 ? 1 : 0.5}
+                    />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {/* ── Library Section ───────────────────────────────────────────────── */}
         <div id="library-section" className="text-right">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
             <div>
-              <h3 className="text-xl font-bold text-textPrimary font-arabic">مكتبة الكتب المتوفرة</h3>
+              <h3 className="text-xl font-bold text-textPrimary">مكتبة الكتب المتوفرة</h3>
               <p className="text-xs text-textSecondary mt-0.5 font-semibold">تصفح الكتب واختر كتاباً لبدء رحلة قراءتك اليوم</p>
             </div>
-            
-            {/* Category tabs */}
             <div className="flex flex-wrap gap-2">
               {dynamicCategories.map(cat => (
-                <button
-                  key={cat}
-                  onClick={() => setSelectedCategory(cat)}
+                <button key={cat} onClick={() => setSelectedCategory(cat)}
                   className={`px-3 py-1.5 rounded-custom text-xs font-bold transition-all border ${
                     selectedCategory === cat
                       ? 'bg-primary text-white border-primary shadow-sm shadow-primary/10'
                       : 'bg-white text-textSecondary border-cardBorder hover:text-primary hover:border-primary/30'
-                  }`}
-                >
+                  }`}>
                   {cat}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Book Cards Grid */}
           {loading ? (
             <div className="py-20 flex justify-center items-center">
               <div className="w-8 h-8 border-4 border-primary-light border-t-primary rounded-full animate-spin"></div>
@@ -386,20 +486,16 @@ export const MemberDashboard = () => {
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filteredBooks.map(book => {
-                const pct = getBookProgress(book.id)
-                return (
-                  <BookCard
-                    key={book.id}
-                    book={book}
-                    progress={pct}
-                    onStartRead={handleStartRead}
-                  />
-                )
-              })}
+              {filteredBooks.map(book => (
+                <BookCard
+                  key={book.id}
+                  book={book}
+                  progress={getBookProgress(book.id)}
+                  onStartRead={handleStartRead}
+                />
+              ))}
             </div>
           )}
-
         </div>
 
       </main>
