@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, supabaseAdmin } from '../lib/supabase'
+import { useAuth } from '../context/AuthContext'
 import { Navbar } from '../components/Navbar'
 import { ProgressBar } from '../components/ProgressBar'
 import {
   Users, BookOpen, UserCheck, Plus, FileText, Check, AlertCircle, RefreshCw, Trash2,
-  ChevronDown, ChevronUp, CheckCircle2, XCircle, Flame, TrendingUp
+  ChevronDown, ChevronUp, CheckCircle2, XCircle, Flame, TrendingUp,
+  Shield, UserPlus, ShieldAlert, KeyRound
 } from 'lucide-react'
 import { pdfjs } from 'react-pdf'
 import {
@@ -250,6 +252,7 @@ const MemberChartPanel = ({ member }) => {
 }
 
 export const AdminDashboard = () => {
+  const { user: currentUser } = useAuth()
   const [stats, setStats] = useState({ booksCount: 0, membersCount: 0, activeTodayCount: 0 })
   const [members, setMembers] = useState([])
   const [books, setBooks] = useState([])
@@ -257,6 +260,21 @@ export const AdminDashboard = () => {
   const [refreshing, setRefreshing] = useState(false)
   const [absentMembers, setAbsentMembers] = useState([])
   const [sendingNotif, setSendingNotif] = useState({})
+
+  // Account Management state
+  const [allAccounts, setAllAccounts] = useState([])
+  const [showAddAccount, setShowAddAccount] = useState(false)
+  const [newAccName, setNewAccName] = useState('')
+  const [newAccEmail, setNewAccEmail] = useState('')
+  const [newAccPassword, setNewAccPassword] = useState('')
+  const [newAccRole, setNewAccRole] = useState('member')
+  const [accountError, setAccountError] = useState('')
+  const [accountSuccess, setAccountSuccess] = useState('')
+  const [creatingAccount, setCreatingAccount] = useState(false)
+  
+  const [editingPasswordUserId, setEditingPasswordUserId] = useState(null)
+  const [newPassword, setNewPassword] = useState('')
+  const [updatingPassword, setUpdatingPassword] = useState(false)
 
   // Add Book Form state
   const [showAddForm, setShowAddForm] = useState(false)
@@ -331,6 +349,139 @@ export const AdminDashboard = () => {
     }
   }
 
+  const handleCreateAccount = async (e) => {
+    e.preventDefault()
+    setAccountError('')
+    setAccountSuccess('')
+    
+    if (!newAccName.trim() || !newAccEmail.trim() || !newAccPassword.trim()) {
+      setAccountError('الرجاء تعبئة جميع الحقول')
+      return
+    }
+    
+    if (!supabaseAdmin) {
+      setAccountError('مفتاح الخدمة (Service Role Key) غير مهيأ. لا يمكن إنشاء الحساب.')
+      return
+    }
+    
+    setCreatingAccount(true)
+    try {
+      const { data, error } = await supabaseAdmin.auth.admin.createUser({
+        email: newAccEmail.trim(),
+        password: newAccPassword.trim(),
+        email_confirm: true,
+        user_metadata: { name: newAccName.trim() }
+      })
+      
+      if (error) throw error
+      
+      if (data?.user) {
+        // Update role in profiles
+        const { error: profileError } = await supabase
+          .from('profiles')
+          .update({ role: newAccRole })
+          .eq('id', data.user.id)
+          
+        if (profileError) throw profileError
+        
+        setAccountSuccess('تم إنشاء الحساب بنجاح!')
+        setNewAccName('')
+        setNewAccEmail('')
+        setNewAccPassword('')
+        setNewAccRole('member')
+        setShowAddAccount(false)
+        fetchData()
+        setTimeout(() => setAccountSuccess(''), 3000)
+      }
+    } catch (err) {
+      console.error(err)
+      setAccountError(err.message || 'حدث خطأ أثناء إنشاء الحساب')
+    } finally {
+      setCreatingAccount(false)
+    }
+  }
+
+  const handleUpdatePassword = async (userId) => {
+    setAccountError('')
+    setAccountSuccess('')
+    
+    if (!newPassword.trim()) {
+      alert('الرجاء إدخال كلمة المرور الجديدة')
+      return
+    }
+    
+    if (newPassword.trim().length < 6) {
+      alert('يجب أن تتكون كلمة المرور من 6 أحرف على الأقل')
+      return
+    }
+    
+    if (!supabaseAdmin) {
+      alert('مفتاح الخدمة (Service Role Key) غير مهيأ. لا يمكن تغيير كلمة المرور.')
+      return
+    }
+    
+    setUpdatingPassword(true)
+    try {
+      const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+        password: newPassword.trim()
+      })
+      
+      if (error) throw error
+      
+      alert('تم تغيير كلمة المرور بنجاح!')
+      setEditingPasswordUserId(null)
+      setNewPassword('')
+      fetchData()
+    } catch (err) {
+      console.error(err)
+      alert(err.message || 'حدث خطأ أثناء تحديث كلمة المرور')
+    } finally {
+      setUpdatingPassword(false)
+    }
+  }
+
+  const handleToggleRole = async (userId, currentRole) => {
+    const newRole = currentRole === 'admin' ? 'member' : 'admin'
+    if (!window.confirm(`هل أنت متأكد من رغبتك في تغيير دور هذا المستخدم إلى ${newRole === 'admin' ? 'مدير' : 'عضو'}؟`)) return
+    
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ role: newRole })
+        .eq('id', userId)
+        
+      if (error) throw error
+      
+      fetchData()
+    } catch (err) {
+      console.error(err)
+      alert('حدث خطأ أثناء تغيير دور المستخدم')
+    }
+  }
+
+  const handleDeleteAccount = async (userId) => {
+    if (!window.confirm('هل أنت متأكد من رغبتك في حذف هذا الحساب بشكل نهائي؟ لا يمكن التراجع عن هذا الإجراء.')) return
+    
+    if (!supabaseAdmin) {
+      alert('مفتاح الخدمة (Service Role Key) غير مهيأ. لا يمكن حذف الحساب.')
+      return
+    }
+    
+    try {
+      // 1. Delete from Auth Users
+      const { error: authErr } = await supabaseAdmin.auth.admin.deleteUser(userId)
+      if (authErr) throw authErr
+      
+      // 2. Delete from Profiles (in case cascade is not set)
+      await supabase.from('profiles').delete().eq('id', userId)
+      
+      fetchData()
+    } catch (err) {
+      console.error(err)
+      alert(err.message || 'حدث خطأ أثناء حذف الحساب')
+    }
+  }
+
   const fetchData = async () => {
     try {
       setLoading(true)
@@ -343,11 +494,10 @@ export const AdminDashboard = () => {
         .order('created_at', { ascending: false })
       if (booksErr) throw booksErr
 
-      // Fetch members
+      // Fetch all profiles (both admins and members)
       const { data: dbProfiles, error: profilesErr } = await supabase
         .from('profiles')
         .select('*')
-        .eq('role', 'member')
         .order('created_at', { ascending: false })
       if (profilesErr) throw profilesErr
 
@@ -366,15 +516,16 @@ export const AdminDashboard = () => {
 
       // Compute stats
       const booksCount = dbBooks?.length || 0
-      const membersCount = dbProfiles?.length || 0
+      const membersCount = (dbProfiles || []).filter(p => p.role === 'member').length
       const activeMembersSet = new Set(
         (dbAllLogs || []).filter(l => l.date === todayStr).map(l => l.user_id)
       )
       const activeTodayCount = activeMembersSet.size
       setStats({ booksCount, membersCount, activeTodayCount })
 
-      // Map members with their logs
-      const mappedMembers = dbProfiles.map(profile => {
+      // Map members (only role = member) with their logs
+      const memberProfiles = (dbProfiles || []).filter(p => p.role === 'member')
+      const mappedMembers = memberProfiles.map(profile => {
         const userSessions = (dbSessions || [])
           .filter(s => s.user_id === profile.id)
           .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
@@ -408,6 +559,51 @@ export const AdminDashboard = () => {
         readerCount: (dbSessions || []).filter(s => s.book_id === book.id).length
       }))
       setBooks(mappedBooks)
+
+      // Load all accounts with Auth details if supabaseAdmin is configured
+      let mergedAccounts = []
+      if (supabaseAdmin) {
+        try {
+          const { data: authData, error: authUsersErr } = await supabaseAdmin.auth.admin.listUsers()
+          if (authUsersErr) throw authUsersErr
+          
+          const authUsers = authData?.users || []
+          mergedAccounts = authUsers.map(authUser => {
+            const profile = (dbProfiles || []).find(p => p.id === authUser.id)
+            return {
+              id: authUser.id,
+              name: profile?.name || authUser.user_metadata?.name || 'مجهول',
+              email: authUser.email,
+              role: profile?.role || 'member',
+              created_at: authUser.created_at || profile?.created_at,
+              last_sign_in_at: authUser.last_sign_in_at
+            }
+          })
+          mergedAccounts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        } catch (adminErr) {
+          console.error('Error listing auth users via admin API:', adminErr)
+          // Fallback to profiles table if admin API fails
+          mergedAccounts = (dbProfiles || []).map(profile => ({
+            id: profile.id,
+            name: profile.name || 'مجهول',
+            email: profile.email,
+            role: profile.role || 'member',
+            created_at: profile.created_at,
+            last_sign_in_at: null
+          }))
+        }
+      } else {
+        // Fallback to profiles table if supabaseAdmin is not initialized
+        mergedAccounts = (dbProfiles || []).map(profile => ({
+          id: profile.id,
+          name: profile.name || 'مجهول',
+          email: profile.email,
+          role: profile.role || 'member',
+          created_at: profile.created_at,
+          last_sign_in_at: null
+        }))
+      }
+      setAllAccounts(mergedAccounts)
 
     } catch (err) {
       console.error('Error fetching admin dashboard data:', err)
@@ -523,7 +719,7 @@ export const AdminDashboard = () => {
       const { error } = await supabase.from('books').delete().eq('id', bookId)
       if (error) throw error
       fetchData()
-    } catch (err) {
+    } catch {
       alert('حدث خطأ أثناء حذف الكتاب')
       setLoading(false)
     }
@@ -803,6 +999,236 @@ export const AdminDashboard = () => {
                 ))}
               </div>
             )}
+          </div>
+
+          {/* Account Management Section */}
+          <div className="bg-white border border-cardBorder rounded-custom shadow-sm p-6 text-right">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-textPrimary flex items-center gap-2">
+                  <Shield className="w-5 h-5 text-primary" />
+                  إدارة الحسابات
+                </h3>
+                <p className="text-xs text-textSecondary mt-0.5 font-medium">إنشاء وإدارة حسابات الأعضاء والمدراء وتعديل كلمات المرور</p>
+              </div>
+              <button 
+                onClick={() => {
+                  setShowAddAccount(!showAddAccount)
+                  setAccountError('')
+                  setAccountSuccess('')
+                }}
+                className="py-2 px-4 bg-primary text-white text-xs font-bold rounded-custom hover:bg-primary/90 flex items-center space-x-1.5 space-x-reverse shadow-md shadow-primary/10 shrink-0"
+              >
+                <UserPlus className="w-4 h-4" />
+                <span>إنشاء حساب جديد</span>
+              </button>
+            </div>
+
+            {/* Error & Success Messages */}
+            {accountError && (
+              <div className="mb-4 bg-red-50 text-danger text-xs font-semibold px-4 py-3 rounded-custom border border-danger/20 flex items-center space-x-2 space-x-reverse">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{accountError}</span>
+              </div>
+            )}
+            {accountSuccess && (
+              <div className="mb-4 bg-green-50 text-success text-xs font-semibold px-4 py-3 rounded-custom border border-success/20 flex items-center space-x-2 space-x-reverse">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>{accountSuccess}</span>
+              </div>
+            )}
+
+            {/* Create Account Form */}
+            {showAddAccount && (
+              <div className="bg-[#F8F7F4]/50 border border-cardBorder rounded-custom p-4 mb-6 text-right">
+                <h4 className="text-sm font-bold text-textPrimary mb-3 flex items-center gap-1.5">
+                  <UserPlus className="w-4 h-4 text-primary" />
+                  إنشاء حساب مستخدم جديد
+                </h4>
+                <form onSubmit={handleCreateAccount} className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 items-end">
+                  <div>
+                    <label className="text-[11px] font-bold text-textPrimary block mb-1">الاسم الكامل</label>
+                    <input 
+                      type="text" 
+                      required 
+                      value={newAccName} 
+                      onChange={e => setNewAccName(e.target.value)}
+                      placeholder="مثال: محمد أحمد"
+                      className="w-full px-3 py-2 bg-white border border-cardBorder rounded-custom text-xs focus:outline-none focus:border-primary text-right" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold text-textPrimary block mb-1">البريد الإلكتروني</label>
+                    <input 
+                      type="email" 
+                      required 
+                      value={newAccEmail} 
+                      onChange={e => setNewAccEmail(e.target.value)}
+                      placeholder="name@example.com"
+                      className="w-full px-3 py-2 bg-white border border-cardBorder rounded-custom text-xs focus:outline-none focus:border-primary text-right" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold text-textPrimary block mb-1">كلمة المرور</label>
+                    <input 
+                      type="password" 
+                      required 
+                      value={newAccPassword} 
+                      onChange={e => setNewAccPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full px-3 py-2 bg-white border border-cardBorder rounded-custom text-xs focus:outline-none focus:border-primary text-right" 
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="flex-grow">
+                      <label className="text-[11px] font-bold text-textPrimary block mb-1">الصلاحية</label>
+                      <select 
+                        value={newAccRole} 
+                        onChange={e => setNewAccRole(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-cardBorder rounded-custom text-xs focus:outline-none focus:border-primary text-right appearance-none"
+                      >
+                        <option value="member">عضو (قارئ)</option>
+                        <option value="admin">مدير (مسؤول)</option>
+                      </select>
+                    </div>
+                    <button 
+                      type="submit" 
+                      disabled={creatingAccount}
+                      className="py-2 px-4 bg-primary text-white text-xs font-bold rounded-custom hover:bg-primary/95 transition-all flex items-center justify-center shrink-0 h-[34px] shadow-sm disabled:opacity-50"
+                    >
+                      {creatingAccount ? 'جاري الإنشاء...' : 'تأكيد'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* Warning Banner if supabaseAdmin is not set */}
+            {!supabaseAdmin && (
+              <div className="mb-4 bg-orange-50 text-warning text-xs font-semibold px-4 py-3 rounded-custom border border-warning/20 flex items-start space-x-2 space-x-reverse">
+                <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="text-right">
+                  <p className="font-bold">مفتاح الخدمة (Service Role Key) غير مهيأ</p>
+                  <p className="opacity-90 mt-0.5">يرجى إضافة `VITE_SUPABASE_SERVICE_ROLE_KEY` في ملف `.env` لتفعيل عمليات الحسابات (تغيير كلمات المرور، حذف الحسابات، إنشاء مستخدمين مؤكدين).</p>
+                </div>
+              </div>
+            )}
+
+            {/* Accounts Table */}
+            <div className="overflow-x-auto border border-cardBorder rounded-custom">
+              <table className="min-w-full divide-y divide-cardBorder text-right">
+                <thead className="bg-[#F8F7F4]/80">
+                  <tr>
+                    <th className="px-4 py-3 text-xs font-bold text-textSecondary">الاسم</th>
+                    <th className="px-4 py-3 text-xs font-bold text-textSecondary">البريد الإلكتروني</th>
+                    <th className="px-4 py-3 text-xs font-bold text-textSecondary text-center">الصلاحية</th>
+                    <th className="px-4 py-3 text-xs font-bold text-textSecondary">تاريخ الإنشاء</th>
+                    <th className="px-4 py-3 text-xs font-bold text-textSecondary">آخر دخول</th>
+                    <th className="px-4 py-3 text-xs font-bold text-textSecondary text-center">الإجراءات</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-cardBorder/60 text-xs">
+                  {loading ? (
+                    <tr>
+                      <td colSpan="6" className="px-4 py-8 text-center text-textSecondary italic">
+                        جاري تحميل قائمة الحسابات...
+                      </td>
+                    </tr>
+                  ) : allAccounts.length === 0 ? (
+                    <tr>
+                      <td colSpan="6" className="px-4 py-8 text-center text-textSecondary italic">
+                        لا توجد حسابات مسجلة حالياً.
+                      </td>
+                    </tr>
+                  ) : (
+                    allAccounts.map(acc => {
+                      const isSelf = acc.id === currentUser?.id
+                      
+                      return (
+                        <tr key={acc.id} className="hover:bg-[#F8F7F4]/20 transition-colors">
+                          <td className="px-4 py-3 font-semibold text-textPrimary">{acc.name}</td>
+                          <td className="px-4 py-3 text-textSecondary">{acc.email}</td>
+                          <td className="px-4 py-3 text-center">
+                            <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              acc.role === 'admin' 
+                                ? 'bg-purple-100 text-purple-700 border border-purple-200' 
+                                : 'bg-blue-50 text-blue-600 border border-blue-100'
+                            }`}>
+                              {acc.role === 'admin' ? 'مدير' : 'عضو'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-textSecondary">
+                            {acc.created_at ? new Date(acc.created_at).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' }) : '-'}
+                          </td>
+                          <td className="px-4 py-3 text-textSecondary">
+                            {acc.last_sign_in_at ? new Date(acc.last_sign_in_at).toLocaleString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'لم يسجل دخول'}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center justify-center gap-2 flex-wrap">
+                              
+                              {/* Password inline editor trigger */}
+                              {editingPasswordUserId === acc.id ? (
+                                <div className="flex items-center gap-1 bg-[#F8F7F4] p-1.5 rounded-custom border border-cardBorder">
+                                  <input 
+                                    type="password" 
+                                    value={newPassword}
+                                    onChange={e => setNewPassword(e.target.value)}
+                                    placeholder="كلمة مرور جديدة"
+                                    className="px-2 py-1 bg-white border border-cardBorder rounded-custom text-[11px] focus:outline-none w-28 text-right"
+                                  />
+                                  <button 
+                                    onClick={() => handleUpdatePassword(acc.id)}
+                                    disabled={updatingPassword}
+                                    className="px-2 py-1 bg-green-600 text-white rounded-custom hover:bg-green-700 text-[10px] font-bold"
+                                  >
+                                    حفظ
+                                  </button>
+                                  <button 
+                                    onClick={() => { setEditingPasswordUserId(null); setNewPassword('') }}
+                                    className="px-2 py-1 bg-gray-200 text-textSecondary rounded-custom hover:bg-gray-300 text-[10px] font-bold"
+                                  >
+                                    إلغاء
+                                  </button>
+                                </div>
+                              ) : (
+                                <button 
+                                  onClick={() => { setEditingPasswordUserId(acc.id); setNewPassword('') }}
+                                  disabled={!supabaseAdmin}
+                                  className="p-1.5 text-textSecondary hover:text-primary hover:bg-primary-light rounded-custom transition-colors disabled:opacity-30"
+                                  title="تغيير كلمة المرور"
+                                >
+                                  <KeyRound className="w-4 h-4" />
+                                </button>
+                              )}
+
+                              {/* Toggle Role Button */}
+                              <button 
+                                onClick={() => handleToggleRole(acc.id, acc.role)}
+                                className="p-1.5 text-textSecondary hover:text-primary hover:bg-primary-light rounded-custom transition-colors"
+                                title="تغيير الدور"
+                              >
+                                <Shield className="w-4 h-4" />
+                              </button>
+
+                              {/* Delete User Button */}
+                              <button 
+                                onClick={() => handleDeleteAccount(acc.id)}
+                                disabled={!supabaseAdmin || isSelf}
+                                className="p-1.5 text-textSecondary hover:text-danger hover:bg-red-50 rounded-custom transition-colors disabled:opacity-30"
+                                title="حذف الحساب"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </main>
