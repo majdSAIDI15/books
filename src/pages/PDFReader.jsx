@@ -41,6 +41,7 @@ export const PDFReader = () => {
   
   // Toast notifications state
   const [showToast, setShowToast] = useState(false)
+  const [toastMessage, setToastMessage] = useState('تم الحفظ ✓')
 
   // Annotations state
   const [annotations, setAnnotations] = useState([])
@@ -49,12 +50,13 @@ export const PDFReader = () => {
     pageNum: null,
     rect: null,
     showToolbar: false,
-    showCommentInput: false,
+    color: 'yellow',
     commentText: ''
   })
   
   // Sidebar and personal notes state
   const [showPanel, setShowPanel] = useState(false)
+  const [activeTab, setActiveTab] = useState('annotations') // 'annotations' or 'notes'
   const [notesContent, setNotesContent] = useState('')
   const [saveStatus, setSaveStatus] = useState('') // '', 'saving', 'saved', 'error'
   const notesRef = useRef('')
@@ -174,6 +176,7 @@ export const PDFReader = () => {
           let bgStyle = 'rgba(253, 224, 71, 0.45)' // yellow
           if (ann.color === 'blue') bgStyle = 'rgba(147, 197, 253, 0.45)'
           else if (ann.color === 'red') bgStyle = 'rgba(252, 165, 165, 0.45)'
+          else if (ann.color === 'green') bgStyle = 'rgba(110, 231, 183, 0.45)' // green
 
           span.innerHTML = spanText.replace(
             regex,
@@ -302,26 +305,31 @@ export const PDFReader = () => {
           height: rect.height
         },
         showToolbar: true,
-        showCommentInput: false,
+        color: 'yellow',
         commentText: ''
       })
     }
 
-    const onMouseUp = () => {
+    const onMouseUp = (e) => {
       setTimeout(() => {
         const sel = window.getSelection()
-        if (!sel || sel.isCollapsed) {
-          const activeEl = document.activeElement
-          const isToolbarFocused = activeEl && activeEl.closest('.selection-toolbar')
-          
-          if (!isToolbarFocused) {
-            setSelectionState(prev => {
-              if (prev.showCommentInput) return prev
-              return { ...prev, showToolbar: false }
-            })
+        const text = sel ? sel.toString().trim() : ''
+        
+        if (text) {
+          const container = document.querySelector('.pdf-container')
+          if (container && container.contains(sel.anchorNode)) {
+            handleSelection()
+            return
           }
-        } else {
-          handleSelection()
+        }
+
+        // Hide toolbar if click is outside the toolbar
+        const isClickInsideToolbar = e.target.closest('.selection-toolbar')
+        if (!isClickInsideToolbar) {
+          setSelectionState(prev => ({
+            ...prev,
+            showToolbar: false
+          }))
         }
       }, 80)
     }
@@ -369,10 +377,14 @@ export const PDFReader = () => {
         pageNum: null,
         rect: null,
         showToolbar: false,
-        showCommentInput: false,
+        color: 'yellow',
         commentText: ''
       })
       window.getSelection().removeAllRanges()
+
+      // Show Arabic toast "تم حفظ التعليق ✓"
+      setToastMessage('تم حفظ التعليق ✓')
+      setShowToast(true)
 
     } catch (err) {
       console.error('Error saving annotation:', err.message)
@@ -586,6 +598,7 @@ export const PDFReader = () => {
       pendingSaveRef.current = false
 
       // Show Arabic Save success toast briefly
+      setToastMessage('تم الحفظ ✓')
       setShowToast(true)
 
     } catch (err) {
@@ -709,6 +722,13 @@ export const PDFReader = () => {
     }
   }, [pdfLoading, numPages])
 
+  const scrollToPage = (pageNum) => {
+    const el = document.querySelector(`[data-page-number="${pageNum}"]`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-bgMain flex flex-col justify-center items-center p-4">
@@ -762,10 +782,15 @@ export const PDFReader = () => {
           <div className="flex items-center space-x-2 space-x-reverse">
             <button
               onClick={() => setShowPanel(true)}
-              className="flex items-center space-x-1.5 space-x-reverse px-3 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary rounded-custom font-bold text-xs transition-all"
+              className="flex items-center space-x-1.5 space-x-reverse px-3 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary rounded-custom font-bold text-xs transition-all relative"
             >
               <FileText className="w-4 h-4" />
               <span>ملاحظاتي</span>
+              {annotations.length > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[9px] font-bold rounded-full w-4.5 h-4.5 flex items-center justify-center shadow-sm px-1">
+                  {annotations.length}
+                </span>
+              )}
             </button>
           </div>
 
@@ -793,7 +818,7 @@ export const PDFReader = () => {
           <div className={`pdf-container ${pdfLoading ? 'hidden' : 'flex'} flex-col w-full space-y-6 pb-24`}>
             <Document
               file={book.pdf_url}
-              onLoadSuccess={onDocumentLoadSuccess}
+              onDocumentLoadSuccess={onDocumentLoadSuccess}
               onLoadProgress={({ loaded, total }) => {
                 if (total > 0) {
                   setLoadProgress(Math.round((loaded / total) * 100))
@@ -857,89 +882,90 @@ export const PDFReader = () => {
         <span className="opacity-80">{numPages || '...'}</span>
       </div>
 
-      {/* Floating Arabic Toast "تم الحفظ ✓" */}
+      {/* Floating Arabic Toast */}
       <div 
         className={`fixed bottom-20 left-1/2 transform -translate-x-1/2 z-50 bg-[#1D9E75] text-white py-2 px-5 rounded-custom text-xs font-semibold shadow-md flex items-center space-x-1 space-x-reverse transition-all duration-300 ${
           showToast ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-4 scale-95 pointer-events-none'
         }`}
       >
-        <span>تم الحفظ</span>
-        <span className="font-bold">✓</span>
+        <span>{toastMessage}</span>
       </div>
+
+      {/* Fixed Button on the Right Side of Reader */}
+      <button
+        onClick={() => setShowPanel(true)}
+        className="fixed right-0 top-1/2 transform -translate-y-1/2 z-40 bg-primary hover:bg-primary/95 text-white py-4 px-2.5 rounded-l-custom shadow-xl transition-all flex flex-col items-center justify-center space-y-1 font-bold text-xs select-none cursor-pointer border border-r-0 border-white/20"
+      >
+        <span className="flex items-center gap-1 [writing-mode:vertical-rl] tracking-wide text-[11px] font-arabic">
+          <span>📝</span>
+          <span>ملاحظاتي</span>
+        </span>
+        {annotations.length > 0 && (
+          <span className="bg-red-500 text-white text-[10px] font-bold rounded-full px-1.5 py-0.5 min-w-4 h-4 flex items-center justify-center mt-1">
+            {annotations.length}
+          </span>
+        )}
+      </button>
 
       {/* Floating Selection Toolbar */}
       {selectionState.showToolbar && selectionState.rect && (
         <div
-          className="fixed z-50 bg-[#2C2C2A] text-white shadow-xl rounded-custom px-3 py-2 flex flex-col space-y-2 border border-[#E0DED6]/20 backdrop-blur-md animate-fade-in selection-toolbar"
+          className="fixed z-50 bg-[#2C2C2A] text-white shadow-xl rounded-custom p-3 flex flex-col space-y-2 border border-[#E0DED6]/20 backdrop-blur-md animate-fade-in selection-toolbar w-72"
           style={{
             top: `${
-              selectionState.rect.clientY > 110
-                ? selectionState.rect.clientY - 60
+              selectionState.rect.clientY > 130
+                ? selectionState.rect.clientY - 95
                 : selectionState.rect.clientY + selectionState.rect.height + 15
             }px`,
             left: `${selectionState.rect.clientX + selectionState.rect.width / 2}px`,
             transform: 'translateX(-50%)',
+            direction: 'rtl'
           }}
           onMouseDown={(e) => e.stopPropagation()}
           onMouseUp={(e) => e.stopPropagation()}
         >
-          {!selectionState.showCommentInput ? (
+          {/* Colors Selection */}
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-white/70 font-bold">لون التظليل:</span>
             <div className="flex items-center space-x-2 space-x-reverse">
-              <button
-                onClick={() => saveAnnotation('yellow')}
-                className="w-6 h-6 rounded-full bg-amber-400 hover:scale-110 transition-transform flex items-center justify-center text-[10px]"
-                title="تظليل أصفر"
-              >
-                🟡
-              </button>
-              <button
-                onClick={() => saveAnnotation('blue')}
-                className="w-6 h-6 rounded-full bg-blue-400 hover:scale-110 transition-transform flex items-center justify-center text-[10px]"
-                title="تظليل أزرق"
-              >
-                🔵
-              </button>
-              <button
-                onClick={() => saveAnnotation('red')}
-                className="w-6 h-6 rounded-full bg-red-400 hover:scale-110 transition-transform flex items-center justify-center text-[10px]"
-                title="تظليل أحمر"
-              >
-                🔴
-              </button>
-              <div className="w-[1px] h-4 bg-white/20" />
-              <button
-                onClick={() => setSelectionState(prev => ({ ...prev, showCommentInput: true }))}
-                className="p-1 hover:bg-white/10 rounded transition-colors flex items-center justify-center text-xs font-bold text-white/90"
-                title="إضافة تعليق"
-              >
-                💬 <span className="mr-1 text-[10px]">تعليق</span>
-              </button>
-            </div>
-          ) : (
-            <div className="flex flex-col space-y-1.5 w-60 p-1">
-              <textarea
-                value={selectionState.commentText}
-                onChange={(e) => setSelectionState(prev => ({ ...prev, commentText: e.target.value }))}
-                placeholder="اكتب تعليقك هنا..."
-                className="w-full p-2 text-xs bg-[#1E1E1C] text-white border border-white/10 rounded focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary resize-none h-16 font-arabic"
-                autoFocus
-              />
-              <div className="flex items-center justify-end space-x-1.5 space-x-reverse">
+              {[
+                { key: 'yellow', emoji: '🟡', bg: 'bg-amber-400', label: 'أصفر' },
+                { key: 'blue', emoji: '🔵', bg: 'bg-blue-400', label: 'أزرق' },
+                { key: 'red', emoji: '🔴', bg: 'bg-red-400', label: 'أحمر' },
+                { key: 'green', emoji: '🟢', bg: 'bg-emerald-400', label: 'أخضر' }
+              ].map((colorOpt) => (
                 <button
-                  onClick={() => setSelectionState(prev => ({ ...prev, showCommentInput: false }))}
-                  className="px-2.5 py-1 text-[10px] text-white/60 hover:text-white transition-colors"
+                  key={colorOpt.key}
+                  type="button"
+                  onClick={() => setSelectionState(prev => ({ ...prev, color: colorOpt.key }))}
+                  className={`w-6 h-6 rounded-full ${colorOpt.bg} hover:scale-110 transition-transform flex items-center justify-center text-[11px] relative cursor-pointer ${
+                    selectionState.color === colorOpt.key ? 'ring-2 ring-white ring-offset-2 ring-offset-[#2C2C2A] scale-110' : ''
+                  }`}
+                  title={colorOpt.label}
                 >
-                  إلغاء
+                  {colorOpt.emoji}
                 </button>
-                <button
-                  onClick={() => saveAnnotation('yellow', selectionState.commentText)}
-                  className="px-2.5 py-1 text-[10px] bg-primary text-white font-bold rounded hover:bg-primary/95 transition-colors"
-                >
-                  حفظ
-                </button>
-              </div>
+              ))}
             </div>
-          )}
+          </div>
+
+          {/* Comment input & save */}
+          <div className="flex items-center gap-2 mt-1">
+            <input
+              type="text"
+              value={selectionState.commentText || ''}
+              onChange={(e) => setSelectionState(prev => ({ ...prev, commentText: e.target.value }))}
+              placeholder="اكتب تعليقاً اختيارياً..."
+              className="flex-1 px-2.5 py-1.5 text-xs bg-[#1E1E1C] text-white border border-white/10 rounded focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary font-arabic"
+            />
+            <button
+              onClick={() => saveAnnotation(selectionState.color || 'yellow', selectionState.commentText)}
+              className="px-2.5 py-1.5 bg-primary hover:bg-primary/95 text-white font-bold rounded text-xs transition-colors flex items-center justify-center cursor-pointer"
+              title="تأكيد وحفظ"
+            >
+              ✓
+            </button>
+          </div>
         </div>
       )}
 
@@ -951,111 +977,160 @@ export const PDFReader = () => {
             className="fixed inset-0 bg-[#2C2C2A]/30 z-40 backdrop-blur-[2px] transition-opacity duration-300"
             onClick={() => setShowPanel(false)}
           />
-          {/* Slide-in panel (slides from Left since RTL layout) */}
+          {/* Slide-in panel (slides from Right since RTL layout, overlays layout) */}
           <div 
-            className="fixed inset-y-0 left-0 w-80 max-w-full bg-white shadow-2xl border-r border-cardBorder z-50 flex flex-col h-full animate-slide-in font-arabic selection-toolbar"
+            className="fixed inset-y-0 right-0 w-80 max-w-full bg-white dark:bg-[#2C2C2A] shadow-2xl border-l border-cardBorder dark:border-white/10 z-50 flex flex-col h-full animate-slide-in-right font-arabic"
             onMouseDown={(e) => e.stopPropagation()}
+            style={{ direction: 'rtl' }}
           >
             {/* Header */}
-            <div className="p-4 border-b border-cardBorder flex items-center justify-between bg-bgMain">
-              <h2 className="font-bold text-textPrimary text-sm flex items-center space-x-2 space-x-reverse">
+            <div className="p-4 border-b border-cardBorder dark:border-white/10 flex items-center justify-between bg-bgMain dark:bg-[#1E1E1C]">
+              <h2 className="font-bold text-textPrimary dark:text-white text-sm flex items-center space-x-2 space-x-reverse">
                 <FileText className="w-4 h-4 text-primary" />
                 <span>ملاحظاتي وتعليقاتي</span>
               </h2>
               <button 
                 onClick={() => setShowPanel(false)}
-                className="p-1 hover:bg-cardBorder/50 rounded-full transition-colors text-textSecondary hover:text-textPrimary"
+                className="p-1 hover:bg-cardBorder/50 dark:hover:bg-white/10 rounded-full transition-colors text-textSecondary hover:text-textPrimary dark:text-white/60 dark:hover:text-white"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {/* Tab switchers */}
+            <div className="flex border-b border-cardBorder dark:border-white/10 bg-white dark:bg-[#2C2C2A]">
+              <button
+                onClick={() => setActiveTab('annotations')}
+                className={`flex-1 py-3 text-center text-xs font-bold transition-all border-b-2 ${
+                  activeTab === 'annotations'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
+                }`}
+              >
+                التعليقات ({annotations.length})
+              </button>
+              <button
+                onClick={() => setActiveTab('notes')}
+                className={`flex-1 py-3 text-center text-xs font-bold transition-all border-b-2 ${
+                  activeTab === 'notes'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
+                }`}
+              >
+                ملاحظات حرة
+              </button>
+            </div>
             
             {/* Scrollable content area */}
-            <div className="flex-grow overflow-y-auto p-4 space-y-5">
-              {/* Annotations Section */}
-              <div className="space-y-3">
-                <h3 className="font-bold text-textPrimary text-xs border-b border-cardBorder pb-2">التعليقات والمقاطع المحددة</h3>
-                {annotations.length === 0 ? (
-                  <p className="text-xs text-textSecondary text-center py-8 leading-relaxed">
-                    لا توجد مقاطع محددة بعد. حدد أي نص في الكتاب لتظليله أو إضافة تعليق عليه.
-                  </p>
-                ) : (
-                  <div className="space-y-4">
-                    {Object.entries(
-                      annotations.reduce((acc, ann) => {
-                        const page = ann.page_number
-                        if (!acc[page]) acc[page] = []
-                        acc[page].push(ann)
-                        return acc
-                      }, {})
-                    ).map(([pageNum, pageAnns]) => (
-                      <div key={pageNum} className="space-y-2">
-                        <div className="text-[10px] font-bold text-primary bg-primary-light px-2 py-0.5 rounded inline-block">
-                          صفحة {pageNum}
-                        </div>
-                        <div className="space-y-2">
-                          {pageAnns.map(ann => (
-                            <div 
-                              key={ann.id} 
-                              className={`p-3 rounded-custom border-r-4 text-xs relative group transition-all ${
-                                ann.color === 'blue' 
-                                  ? 'bg-blue-50/70 border-blue-400' 
-                                  : ann.color === 'red' 
-                                  ? 'bg-red-50/70 border-red-400' 
-                                  : 'bg-amber-50/70 border-amber-400'
-                              }`}
-                            >
-                              <button
-                                onClick={() => deleteAnnotation(ann)}
-                                className="absolute top-2 left-2 p-1 text-textSecondary hover:text-danger opacity-0 group-hover:opacity-100 transition-opacity rounded hover:bg-black/5"
-                                title="حذف"
+            <div className="flex-grow overflow-y-auto p-4 space-y-4 bg-white dark:bg-[#2C2C2A]">
+              {activeTab === 'annotations' ? (
+                /* Tab 1: Annotations */
+                <div className="space-y-3">
+                  {annotations.length === 0 ? (
+                    <p className="text-xs text-textSecondary dark:text-white/40 text-center py-8 leading-relaxed">
+                      لا توجد مقاطع محددة بعد. حدد أي نص في الكتاب لتظليله أو إضافة تعليق عليه.
+                    </p>
+                  ) : (
+                    <div className="space-y-4">
+                      {Object.entries(
+                        annotations.reduce((acc, ann) => {
+                          const page = ann.page_number
+                          if (!acc[page]) acc[page] = []
+                          acc[page].push(ann)
+                          return acc
+                        }, {})
+                      )
+                      .sort(([a], [b]) => parseInt(a, 10) - parseInt(b, 10))
+                      .map(([pageNum, pageAnns]) => (
+                        <div key={pageNum} className="space-y-2">
+                          <div className="text-[10px] font-bold text-primary bg-primary/10 dark:bg-primary/20 px-2 py-0.5 rounded inline-block">
+                            صفحة {pageNum}
+                          </div>
+                          <div className="space-y-2">
+                            {pageAnns.map(ann => (
+                              <div 
+                                key={ann.id} 
+                                onClick={() => scrollToPage(ann.page_number)}
+                                className={`p-3 rounded-custom border-l-4 text-xs relative group transition-all cursor-pointer hover:shadow-md ${
+                                  ann.color === 'blue' 
+                                    ? 'bg-blue-50/70 border-blue-400 hover:bg-blue-50 dark:bg-blue-950/20 dark:border-blue-500' 
+                                    : ann.color === 'red' 
+                                    ? 'bg-red-50/70 border-red-400 hover:bg-red-50 dark:bg-red-950/20 dark:border-red-500' 
+                                    : ann.color === 'green'
+                                    ? 'bg-emerald-50/70 border-emerald-400 hover:bg-emerald-50 dark:bg-emerald-950/20 dark:border-emerald-500'
+                                    : 'bg-amber-50/70 border-amber-400 hover:bg-amber-50 dark:bg-amber-950/20 dark:border-amber-500'
+                                }`}
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                              
-                              <p className="font-medium text-textPrimary leading-relaxed pl-5 break-words font-arabic">
-                                "{ann.selected_text}"
-                              </p>
-                              
-                              {ann.comment && (
-                                <div className="mt-2 pt-2 border-t border-cardBorder/30 text-textSecondary flex items-start space-x-1 space-x-reverse">
-                                  <span className="font-bold text-primary shrink-0">تعليق:</span>
-                                  <span className="flex-1 break-words">{ann.comment}</span>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation() // prevent scroll event
+                                    deleteAnnotation(ann)
+                                  }}
+                                  className="absolute top-2 left-2 p-1 text-textSecondary hover:text-danger rounded hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                  title="حذف"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+
+                                {/* Badge & page label inside card */}
+                                <div className="flex items-center gap-1.5 mb-1 text-[10px] text-textSecondary dark:text-white/60">
+                                  <span className={`w-2 h-2 rounded-full ${
+                                    ann.color === 'blue'
+                                      ? 'bg-blue-500'
+                                      : ann.color === 'red'
+                                      ? 'bg-red-500'
+                                      : ann.color === 'green'
+                                      ? 'bg-emerald-500'
+                                      : 'bg-amber-400'
+                                  }`} />
+                                  <span>
+                                    {ann.color === 'blue' ? 'أزرق' : ann.color === 'red' ? 'أحمر' : ann.color === 'green' ? 'أخضر' : 'أصفر'}
+                                  </span>
+                                  <span>•</span>
+                                  <span>ص {ann.page_number}</span>
                                 </div>
-                              )}
-                            </div>
-                          ))}
+                                
+                                <p className="font-medium text-textPrimary dark:text-white leading-relaxed pl-6 break-words font-arabic line-clamp-2">
+                                  "{ann.selected_text}"
+                                </p>
+                                
+                                {ann.comment && (
+                                  <div className="mt-2 pt-2 border-t border-cardBorder/30 dark:border-white/10 text-textSecondary dark:text-white/60 flex items-start space-x-1 space-x-reverse">
+                                    <span className="font-bold text-primary shrink-0">تعليق:</span>
+                                    <span className="flex-1 break-words leading-normal">{ann.comment}</span>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              
-              <hr className="border-cardBorder" />
-              
-              {/* Personal Free-Text Notes Section */}
-              <div className="flex flex-col space-y-2 pb-6">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-bold text-textPrimary text-xs">ملاحظات حرة</h3>
-                  <span className="text-[10px] text-textSecondary font-semibold">
-                    {saveStatus === 'saving' && 'جاري حفظ التغييرات...'}
-                    {saveStatus === 'saved' && 'تم الحفظ تلقائياً ✓'}
-                    {saveStatus === 'error' && 'فشل الحفظ تلقائياً!'}
-                  </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <textarea
-                  value={notesContent}
-                  onChange={handleNotesChange}
-                  placeholder="اكتب ملاحظاتك الحرة هنا عن هذا الكتاب..."
-                  className="w-full h-44 p-3 text-xs bg-bgMain border border-cardBorder rounded-custom focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary resize-y font-arabic leading-relaxed"
-                />
-              </div>
+              ) : (
+                /* Tab 2: Free Notes */
+                <div className="flex flex-col space-y-2 h-full">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-textSecondary dark:text-white/60 font-bold">اكتب ملاحظاتك بحرية</span>
+                    <span className="text-[10px] text-[#1D9E75] font-semibold">
+                      {saveStatus === 'saving' && 'جاري حفظ التغييرات...'}
+                      {saveStatus === 'saved' && 'تم الحفظ ✓'}
+                      {saveStatus === 'error' && 'فشل الحفظ تلقائياً!'}
+                    </span>
+                  </div>
+                  <textarea
+                    value={notesContent}
+                    onChange={handleNotesChange}
+                    placeholder="اكتب ملاحظاتك هنا..."
+                    className="w-full h-80 p-3 text-xs bg-bgMain dark:bg-[#1E1E1C] border border-cardBorder dark:border-white/10 dark:text-white rounded-custom focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary resize-none font-arabic leading-relaxed"
+                  />
+                </div>
+              )}
             </div>
           </div>
         </>
       )}
-
 
     </div>
   )
