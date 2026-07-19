@@ -11,77 +11,7 @@ import {
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell
 } from 'recharts'
-
-// ─── Date / Chart helpers ─────────────────────────────────────────────────────
-
-const ARABIC_DAYS = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت']
-
-const getLocalDateStr = (offsetDays = 0) => {
-  const d = new Date()
-  d.setDate(d.getDate() - offsetDays)
-  const offset = d.getTimezoneOffset()
-  const local = new Date(d.getTime() - offset * 60000)
-  return local.toISOString().split('T')[0]
-}
-
-/** Build chart data for the chosen range from all logs */
-const buildChartData = (logs, range) => {
-  if (range === 'all') {
-    if (!logs.length) return []
-    // Sort ascending
-    const sorted = [...logs].sort((a, b) => a.date.localeCompare(b.date))
-    const earliest = sorted[0].date
-    const today = getLocalDateStr()
-    const days = []
-    let cur = new Date(earliest)
-    const end = new Date(today)
-    while (cur <= end) {
-      const dateStr = cur.toISOString().split('T')[0]
-      const log = logs.find(l => l.date === dateStr)
-      days.push({
-        date: dateStr,
-        day: ARABIC_DAYS[cur.getDay()],
-        pages: log ? log.pages_read : 0
-      })
-      cur.setDate(cur.getDate() + 1)
-    }
-    return days
-  }
-
-  const n = range === '7' ? 7 : 30
-  const result = []
-  for (let i = n - 1; i >= 0; i--) {
-    const dateStr = getLocalDateStr(i)
-    const log = logs.find(l => l.date === dateStr)
-    result.push({
-      date: dateStr,
-      day: ARABIC_DAYS[new Date(dateStr).getDay()],
-      pages: log ? log.pages_read : 0
-    })
-  }
-  return result
-}
-
-/** Total pages in last 7 days */
-const getLast7Total = (logs) => {
-  let total = 0
-  for (let i = 0; i < 7; i++) {
-    const log = logs.find(l => l.date === getLocalDateStr(i))
-    if (log) total += log.pages_read
-  }
-  return total
-}
-
-/** Consecutive day streak from today backwards */
-const getStreak = (logs) => {
-  let streak = 0
-  let i = 0
-  while (true) {
-    const log = logs.find(l => l.date === getLocalDateStr(i))
-    if (log && log.pages_read > 0) { streak++; i++ } else break
-  }
-  return streak
-}
+import { getLocalDateStr, buildChartData, getLast7Total, getStreak, sumPagesForDate } from '../lib/stats'
 
 // ─── Custom BarChart Tooltip ──────────────────────────────────────────────────
 
@@ -120,15 +50,13 @@ export const MemberDashboard = () => {
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [settingsMessage, setSettingsMessage] = useState('')
 
-  const getLocalDateStrFn = () => getLocalDateStr(0)
-
   // ── Fetch ────────────────────────────────────────────────────────────────────
 
   const fetchData = async () => {
     if (!user) return
     try {
       setLoading(true)
-      const todayStr = getLocalDateStrFn()
+      const todayStr = getLocalDateStr()
 
       // All books
       const { data: dbBooks, error: booksErr } = await supabase.from('books').select('*')
@@ -150,9 +78,8 @@ export const MemberDashboard = () => {
       if (logsErr) throw logsErr
       setAllLogs(dbLogs || [])
 
-      // Check if read today
-      const readToday = (dbLogs || []).some(l => l.date === todayStr && l.pages_read > 0)
-      setHasReadToday(readToday)
+      // Check if read today (tous livres confondus)
+      setHasReadToday(sumPagesForDate(dbLogs, todayStr) > 0)
 
     } catch (err) {
       console.error('Error fetching member dashboard data:', err)

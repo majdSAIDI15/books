@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { Document, Page, pdfjs } from 'react-pdf'
 import { ArrowRight, BookOpen, AlertTriangle, RefreshCw, FileText, Trash2, X } from 'lucide-react'
+import { getLocalDateStr } from '../lib/stats'
 
 // Import text layer styles for text selection
 import 'react-pdf/dist/Page/TextLayer.css'
@@ -25,18 +26,29 @@ export const PDFReader = () => {
   const [loadProgress, setLoadProgress] = useState(0)
   const [renderedPages, setRenderedPages] = useState({})
   const [error, setError] = useState('')
-  const [versionKey] = useState(() => Date.now())
 
 
-  // State to track session progress
+  // ── Comptabilisation de la progression ──────────────────────────────────────
+  // initialPageRef      : page de reprise (pour le scroll automatique)
+  // sessionStartPageRef : page à laquelle la fenêtre de comptage a démarré
+  // baselineTodayRef    : pages déjà enregistrées aujourd'hui en base
+  // logDateRef          : date de cette fenêtre (pour gérer le passage à minuit)
+  //
+  // pages_read = baseline + (maxPageReached - sessionStartPage)
+  // Cette formule est idempotente : réécrire plusieurs fois ne double pas le
+  // total, contrairement à l'ancien Math.max(alreadyRead, maxPageReached) qui
+  // enregistrait un NUMÉRO DE PAGE à la place d'un NOMBRE DE PAGES LUES.
   const initialPageRef = useRef(1)
   const maxPageReachedRef = useRef(1)
-  const alreadyReadTodayRef = useRef(0)
+  const sessionStartPageRef = useRef(1)
+  const baselineTodayRef = useRef(0)
+  const logDateRef = useRef(null)
   const currentPageRef = useRef(1)
   const hasScrolledRef = useRef(false)
   const observerRef = useRef(null)
   const saveTimeoutRef = useRef(null)
   const pendingSaveRef = useRef(false)
+  const accessTokenRef = useRef(null)
 
   // Responsive page width state
   const [pageWidth, setPageWidth] = useState(window.innerWidth > 768 ? 650 : window.innerWidth - 32)
@@ -66,12 +78,24 @@ export const PDFReader = () => {
   const latestNotesContentRef = useRef('')
 
 
-  const getLocalDateStr = () => {
-    const d = new Date()
-    const offset = d.getTimezoneOffset()
-    const localDate = new Date(d.getTime() - (offset * 60 * 1000))
-    return localDate.toISOString().split('T')[0]
-  }
+  /**
+   * Nombre de pages réellement lues aujourd'hui, tous appels confondus.
+   * Gère le passage de minuit en pleine session : on repart d'une base à zéro
+   * et on redémarre la fenêtre de comptage à la page courante.
+   */
+  const computePagesReadToday = useCallback((todayStr) => {
+    // La session n'est pas encore chargée : on ne connaît pas la base du jour,
+    // écrire maintenant écraserait le compteur réel par 0.
+    if (logDateRef.current === null) return null
+
+    if (logDateRef.current !== todayStr) {
+      logDateRef.current = todayStr
+      baselineTodayRef.current = 0
+      sessionStartPageRef.current = maxPageReachedRef.current
+    }
+    const delta = Math.max(0, maxPageReachedRef.current - sessionStartPageRef.current)
+    return baselineTodayRef.current + delta
+  }, [])
 
   // Handle responsive width adjustment
   useEffect(() => {
@@ -127,22 +151,20 @@ export const PDFReader = () => {
         currentPageRef.current = startPage
         initialPageRef.current = startPage
         maxPageReachedRef.current = startPage
+        sessionStartPageRef.current = startPage
 
         // 3. Fetch user's daily log read count for today
         const todayStr = getLocalDateStr()
+        logDateRef.current = todayStr
         const { data: dbLog, error: logErr } = await supabase
           .from('daily_logs')
           .select('pages_read')
           .eq('user_id', user.id)
           .eq('book_id', bookId)
           .eq('date', todayStr)
-          .single()
+          .maybeSingle()
 
-        if (!logErr && dbLog) {
-          alreadyReadTodayRef.current = dbLog.pages_read || 0
-        } else {
-          alreadyReadTodayRef.current = 0
-        }
+        baselineTodayRef.current = (!logErr && dbLog) ? (dbLog.pages_read || 0) : 0
 
       } catch (err) {
         console.error('Error loading book/session:', err)
@@ -480,93 +502,33 @@ export const PDFReader = () => {
   }, [user, bookId])
 
 
-  // Save on unmount / component cleanup
+  // Jeton d'accès tenu à jour pour le handler beforeunload, qui ne peut pas
+  // attendre une promesse. Sans en-tête Authorization, PostgREST exécute la
+  // requête en rôle `anon` : auth.uid() vaut null et RLS la rejette en silence.
   useEffect(() => {
+    let active = true
+    supabase.auth.getSession().then(({ data }) => {
+      if (active) accessTokenRef.current = data.session?.access_token || null
+    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      accessTokenRef.current = session?.access_token || null
+    })
     return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current)
-      }
-      if (pendingSaveRef.current) {
-        const maxReached = maxPageReachedRef.current
-        const todayStr = getLocalDateStr()
-        const pagesReadToday = Math.max(alreadyReadTodayRef.current, maxReached)
-
-        supabase.from('reading_sessions').upsert({
-          user_id: user.id,
-          book_id: bookId,
-          last_page: maxReached,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'user_id,book_id' }).then(({ error }) => {
-          if (error) console.error('Error saving reading session on unmount:', error.message)
-        })
-
-        supabase.from('daily_logs').upsert({
-          user_id: user.id,
-          book_id: bookId,
-          pages_read: pagesReadToday,
-          date: todayStr
-        }, { onConflict: 'user_id,book_id,date' }).then(({ error }) => {
-          if (error) console.error('Error saving daily log on unmount:', error.message)
-        })
-      }
+      active = false
+      subscription?.unsubscribe()
     }
-  }, [user, bookId])
+  }, [])
 
-  // Save on tab close / reload (unload keepalive)
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (!user || !bookId) return
-      
-      const todayStr = getLocalDateStr()
-      const maxReached = maxPageReachedRef.current
-      const pagesReadToday = Math.max(alreadyReadTodayRef.current, maxReached)
+  /** Écriture asynchrone (debounce, démontage). Retourne true si tout a réussi. */
+  const flushProgress = useCallback(async () => {
+    if (!user || !bookId) return false
 
-      const headers = {
-        'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
-        'Content-Type': 'application/json',
-        'Prefer': 'resolution=merge-duplicates'
-      }
-
-      // Upsert Reading Session using keepalive: true
-      fetch(`${import.meta.env.VITE_SUPABASE_URL}/rest/v1/reading_sessions`, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify({
-          user_id: user.id,
-          book_id: bookId,
-          last_page: maxReached,
-          updated_at: new Date().toISOString()
-        }),
-        keepalive: true
-      })
-
-      // Upsert Daily Log using keepalive: true
-      fetch(`${import.meta.env.VITE_SUPABASE_URL}/rest/v1/daily_logs`, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify({
-          user_id: user.id,
-          book_id: bookId,
-          pages_read: pagesReadToday,
-          date: todayStr
-        }),
-        keepalive: true
-      })
-    }
-
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload)
-    }
-  }, [user, bookId])
-
-  const saveProgressToDatabase = async () => {
-    if (!user || !bookId) return
-    const maxReached = maxPageReachedRef.current
     const todayStr = getLocalDateStr()
+    const maxReached = maxPageReachedRef.current
+    const pagesReadToday = computePagesReadToday(todayStr)
+    if (pagesReadToday === null) return false
 
     try {
-      // 1. Save Reading Session (last read page)
       const { error: sessionErr } = await supabase
         .from('reading_sessions')
         .upsert(
@@ -578,12 +540,8 @@ export const PDFReader = () => {
           },
           { onConflict: 'user_id,book_id' }
         )
-      
       if (sessionErr) throw sessionErr
 
-      // 2. Save Daily Log progress (set pages_read = max(pages_read, maxReached))
-      const pagesReadToday = Math.max(alreadyReadTodayRef.current, maxReached)
-      
       const { error: logErr } = await supabase
         .from('daily_logs')
         .upsert(
@@ -595,18 +553,88 @@ export const PDFReader = () => {
           },
           { onConflict: 'user_id,book_id,date' }
         )
-
       if (logErr) throw logErr
-      
-      alreadyReadTodayRef.current = pagesReadToday
+
       pendingSaveRef.current = false
-
-      // Show Arabic Save success toast briefly
-      setToastMessage('تم الحفظ ✓')
-      setShowToast(true)
-
+      return true
     } catch (err) {
       console.error('Error saving reading progress:', err.message)
+      return false
+    }
+  }, [user, bookId, computePagesReadToday])
+
+  /**
+   * Écriture synchrone pour beforeunload : `keepalive` survit à la fermeture de
+   * l'onglet, mais interdit await. On envoie donc le jeton mémorisé.
+   */
+  const flushProgressOnUnload = useCallback(() => {
+    if (!user || !bookId) return
+
+    const token = accessTokenRef.current
+    if (!token) return
+
+    const todayStr = getLocalDateStr()
+    const maxReached = maxPageReachedRef.current
+    const pagesReadToday = computePagesReadToday(todayStr)
+    if (pagesReadToday === null) return
+
+    const headers = {
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates'
+    }
+    const base = import.meta.env.VITE_SUPABASE_URL
+
+    // `on_conflict` est obligatoire pour que merge-duplicates cible la bonne
+    // contrainte unique ; sans lui PostgREST renvoie 409.
+    fetch(`${base}/rest/v1/reading_sessions?on_conflict=user_id,book_id`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        user_id: user.id,
+        book_id: bookId,
+        last_page: maxReached,
+        updated_at: new Date().toISOString()
+      }),
+      keepalive: true
+    }).catch(() => {})
+
+    fetch(`${base}/rest/v1/daily_logs?on_conflict=user_id,book_id,date`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        user_id: user.id,
+        book_id: bookId,
+        pages_read: pagesReadToday,
+        date: todayStr
+      }),
+      keepalive: true
+    }).catch(() => {})
+  }, [user, bookId, computePagesReadToday])
+
+  // Sauvegarde au démontage du composant
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
+      if (pendingSaveRef.current) flushProgress()
+    }
+  }, [flushProgress])
+
+  // Sauvegarde à la fermeture / rechargement de l'onglet
+  useEffect(() => {
+    const handler = () => {
+      if (pendingSaveRef.current) flushProgressOnUnload()
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [flushProgressOnUnload])
+
+  const saveProgressToDatabase = async () => {
+    const ok = await flushProgress()
+    if (ok) {
+      setToastMessage('تم الحفظ ✓')
+      setShowToast(true)
     }
   }
 
@@ -637,18 +665,12 @@ export const PDFReader = () => {
     setNumPages(numPages)
     setPdfLoading(false)
 
-    // Update books total pages in the database if it doesn't match
+    // total_pages est calculé une seule fois par l'admin au moment de l'upload.
+    // Écrire dans `books` depuis une session membre supposait que les membres
+    // aient le droit de modifier n'importe quel livre (cf. bugs.md §1.5).
+    // On se contente d'un correctif local en mémoire si la valeur diverge.
     if (book && book.total_pages !== numPages) {
-      supabase
-        .from('books')
-        .update({ total_pages: numPages })
-        .eq('id', book.id)
-        .then(({ error }) => {
-          if (error) console.error('Failed to sync book total pages:', error.message)
-          else {
-            setBook(prev => prev ? { ...prev, total_pages: numPages } : null)
-          }
-        })
+      setBook(prev => (prev ? { ...prev, total_pages: numPages } : null))
     }
   }
 
@@ -743,6 +765,23 @@ export const PDFReader = () => {
     }
   }
 
+  /**
+   * react-pdf compare la prop `file` par IDENTITÉ. Un objet littéral recréé à
+   * chaque rendu était interprété comme un nouveau document et déclenchait un
+   * re-téléchargement complet du PDF — à chaque scroll, toast ou sélection.
+   * Le useMemo est indispensable ici, pas une optimisation cosmétique.
+   */
+  const pdfUrl = book?.pdf_url
+  const documentFile = useMemo(() => {
+    if (!pdfUrl) return null
+    return {
+      url: pdfUrl,
+      rangeChunkSize: 65536,
+      disableAutoFetch: false,
+      disableStream: false,
+    }
+  }, [pdfUrl])
+
   if (loading) {
     return (
       <div className="min-h-screen bg-bgMain flex flex-col justify-center items-center p-4">
@@ -772,18 +811,6 @@ export const PDFReader = () => {
     )
   }
 
-
-  let pdfUrl = book?.pdf_url
-  if (pdfUrl && !pdfUrl.includes('?')) {
-    pdfUrl = `${pdfUrl}?v=${versionKey}`
-  }
-
-  const loadingTask = {
-    url: pdfUrl,
-    rangeChunkSize: 65536,
-    disableAutoFetch: false,
-    disableStream: false,
-  }
 
   return (
     <div className="min-h-screen bg-bgMain flex flex-col justify-between">
@@ -844,7 +871,7 @@ export const PDFReader = () => {
 
           <div className="pdf-container flex flex-col w-full space-y-6 pb-24">
             <Document
-              file={loadingTask}
+              file={documentFile}
               onDocumentLoadSuccess={onDocumentLoadSuccess}
               onLoadProgress={({ loaded, total }) => {
                 if (total > 0) {

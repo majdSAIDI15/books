@@ -12,99 +12,39 @@ import { pdfjs } from 'react-pdf'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts'
+import {
+  getLocalDateStr, getInitials, getLastReadInfo, buildChartData, getLast7Total, getStreak
+} from '../lib/stats'
 
 // Set PDF.js worker from CDN to avoid packaging issues
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version || '3.11.174'}/build/pdf.worker.min.mjs`
 
 const PASTEL_COVERS = ['#EEEDFE', '#E2F1E8', '#FCEEE3', '#E3F2FD', '#F3E5F5', '#FFF9C4', '#FFE0B2', '#D1C4E9']
-const ARABIC_DAYS = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت']
 
-const getLocalDateStr = (offsetDays = 0) => {
-  const d = new Date()
-  d.setDate(d.getDate() - offsetDays)
-  const offset = d.getTimezoneOffset()
-  const local = new Date(d.getTime() - offset * 60000)
-  return local.toISOString().split('T')[0]
-}
-
-const getInitials = (name) => {
-  if (!name) return 'م'
-  return name.trim().split(' ').map(n => n[0]).join('').slice(0, 2)
-}
-
-const getLastReadInfo = (logs) => {
-  const readLogs = (logs || []).filter(l => l.pages_read > 0)
-  if (readLogs.length === 0) {
-    return { lastDate: null, daysSince: Infinity }
-  }
-  const lastLog = readLogs[readLogs.length - 1]
-  const lastDateStr = lastLog.date
-  
-  const today = new Date(getLocalDateStr(0))
-  const lastReadDate = new Date(lastDateStr)
-  const diffTime = today - lastReadDate
-  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24))
-  
-  return { lastDate: lastDateStr, daysSince: diffDays }
-}
+/**
+ * Les notifications ne sont réellement envoyables que si les DEUX clés OneSignal
+ * sont renseignées. Sans cela on désactive le bouton plutôt que de faire croire
+ * à un envoi réussi.
+ */
+const NOTIFICATIONS_CONFIGURED = Boolean(
+  import.meta.env.VITE_ONESIGNAL_APP_ID &&
+  import.meta.env.VITE_ONESIGNAL_APP_ID !== 'your_onesignal_app_id_here' &&
+  import.meta.env.VITE_ONESIGNAL_REST_API_KEY &&
+  import.meta.env.VITE_ONESIGNAL_REST_API_KEY !== 'YOUR_ONESIGNAL_REST_API_KEY'
+)
 
 const getFlameIndicator = (logs, readToday) => {
   if (readToday) {
     return { colorClass: 'text-success fill-success', tooltip: 'قرأ اليوم' }
   }
-  const { daysSince } = getLastReadInfo(logs)
+  const { daysSince, neverRead } = getLastReadInfo(logs)
+  if (neverRead) {
+    return { colorClass: 'text-textSecondary fill-textSecondary/30', tooltip: 'لم يبدأ القراءة بعد' }
+  }
   if (daysSince === 1) {
     return { colorClass: 'text-orange-500 fill-orange-500', tooltip: 'فات يوم واحد' }
   }
   return { colorClass: 'text-danger fill-danger', tooltip: 'لم يقرأ منذ يومين أو أكثر' }
-}
-
-
-/** Build chart data array for N days (or all), from a user's logs array */
-const buildChartData = (logs, days = 7) => {
-  const result = []
-  const end = days === 'all' ? null : days
-  const total = end || Math.max(
-    7,
-    logs.length > 0
-      ? Math.ceil((new Date(getLocalDateStr()) - new Date(logs[0].date)) / 86400000) + 1
-      : 7
-  )
-  for (let i = total - 1; i >= 0; i--) {
-    const dateStr = getLocalDateStr(i)
-    const dayName = ARABIC_DAYS[new Date(dateStr).getDay()]
-    const log = logs.find(l => l.date === dateStr)
-    result.push({ date: dateStr, day: dayName, pages: log ? log.pages_read : 0 })
-  }
-  return result
-}
-
-/** Last-7-days total pages */
-const getLast7Total = (logs) => {
-  let total = 0
-  for (let i = 0; i < 7; i++) {
-    const dateStr = getLocalDateStr(i)
-    const log = logs.find(l => l.date === dateStr)
-    if (log) total += log.pages_read
-  }
-  return total
-}
-
-/** Streak: consecutive days from today with pages_read > 0 */
-const getStreak = (logs) => {
-  let streak = 0
-  let i = 0
-  while (true) {
-    const dateStr = getLocalDateStr(i)
-    const log = logs.find(l => l.date === dateStr)
-    if (log && log.pages_read > 0) {
-      streak++
-      i++
-    } else {
-      break
-    }
-  }
-  return streak
 }
 
 // Custom compact tooltip for admin line charts
@@ -260,6 +200,7 @@ export const AdminDashboard = () => {
   const [refreshing, setRefreshing] = useState(false)
   const [absentMembers, setAbsentMembers] = useState([])
   const [sendingNotif, setSendingNotif] = useState({})
+  const [notifError, setNotifError] = useState('')
 
   // Account Management state
   const [allAccounts, setAllAccounts] = useState([])
@@ -296,11 +237,9 @@ export const AdminDashboard = () => {
     }
     
     if (!restApiKey || restApiKey === 'YOUR_ONESIGNAL_REST_API_KEY') {
-      console.warn('OneSignal REST API key is missing. Simulating successful reminder.')
-      await new Promise(resolve => setTimeout(resolve, 800))
-      return true
+      throw new Error('خدمة التنبيهات غير مفعّلة: مفتاح OneSignal REST API غير مهيأ.')
     }
-    
+
     const response = await fetch('https://onesignal.com/api/v1/notifications', {
       method: 'POST',
       headers: {
@@ -333,6 +272,7 @@ export const AdminDashboard = () => {
   }
 
   const handleSendReminder = async (memberId, memberName) => {
+    setNotifError('')
     setSendingNotif(prev => ({ ...prev, [memberId]: 'sending' }))
     try {
       await sendOneSignalNotification(memberId, memberName)
@@ -342,6 +282,7 @@ export const AdminDashboard = () => {
       }, 3000)
     } catch (err) {
       console.error(err)
+      setNotifError(err.message || 'فشل إرسال التنبيه')
       setSendingNotif(prev => ({ ...prev, [memberId]: 'error' }))
       setTimeout(() => {
         setSendingNotif(prev => ({ ...prev, [memberId]: null }))
@@ -376,14 +317,15 @@ export const AdminDashboard = () => {
       if (error) throw error
       
       if (data?.user) {
-        // Update role in profiles
-        const { error: profileError } = await supabase
-          .from('profiles')
-          .update({ role: newAccRole })
-          .eq('id', data.user.id)
-          
+        // Même chemin sécurisé que handleToggleRole. La fonction fait un upsert,
+        // ce qui évite la course avec le trigger qui crée la ligne profiles.
+        const { error: profileError } = await supabase.rpc('set_user_role', {
+          target_user_id: data.user.id,
+          new_role: newAccRole,
+        })
+
         if (profileError) throw profileError
-        
+
         setAccountSuccess('تم إنشاء الحساب بنجاح!')
         setNewAccName('')
         setNewAccEmail('')
@@ -441,21 +383,32 @@ export const AdminDashboard = () => {
   }
 
   const handleToggleRole = async (userId, currentRole) => {
+    // Un admin ne peut pas se rétrograder lui-même : il perdrait immédiatement
+    // l'accès à cette page sans pouvoir revenir en arrière.
+    if (userId === currentUser?.id) {
+      setAccountError('لا يمكنك تغيير دورك الخاص.')
+      return
+    }
+
     const newRole = currentRole === 'admin' ? 'member' : 'admin'
     if (!window.confirm(`هل أنت متأكد من رغبتك في تغيير دور هذا المستخدم إلى ${newRole === 'admin' ? 'مدير' : 'عضو'}؟`)) return
-    
+
+    setAccountError('')
     try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ role: newRole })
-        .eq('id', userId)
-        
+      // Passe par une fonction SECURITY DEFINER qui revérifie côté serveur que
+      // l'appelant est bien admin. Un UPDATE direct sur profiles.role depuis le
+      // client anonyme serait contournable par n'importe quel membre.
+      const { error } = await supabase.rpc('set_user_role', {
+        target_user_id: userId,
+        new_role: newRole,
+      })
+
       if (error) throw error
-      
+
       fetchData()
     } catch (err) {
       console.error(err)
-      alert('حدث خطأ أثناء تغيير دور المستخدم')
+      setAccountError(err.message || 'حدث خطأ أثناء تغيير دور المستخدم')
     }
   }
 
@@ -518,7 +471,7 @@ export const AdminDashboard = () => {
       const booksCount = dbBooks?.length || 0
       const membersCount = (dbProfiles || []).filter(p => p.role === 'member').length
       const activeMembersSet = new Set(
-        (dbAllLogs || []).filter(l => l.date === todayStr).map(l => l.user_id)
+        (dbAllLogs || []).filter(l => l.date === todayStr && l.pages_read > 0).map(l => l.user_id)
       )
       const activeTodayCount = activeMembersSet.size
       setStats({ booksCount, membersCount, activeTodayCount })
@@ -546,10 +499,11 @@ export const AdminDashboard = () => {
       })
       setMembers(mappedMembers)
 
-      // Calculate absent members (no entry for both yesterday and today, i.e., daysSince >= 2)
+      // Membres en retard : ont déjà lu, mais rien depuis 2 jours ou plus.
+      // Les membres qui n'ont jamais commencé sont exclus (ce n'est pas une rechute).
       const absent = mappedMembers.filter(member => {
-        const { daysSince } = getLastReadInfo(member.logs)
-        return daysSince >= 2
+        const { daysSince, neverRead } = getLastReadInfo(member.logs)
+        return !neverRead && daysSince >= 2
       })
       setAbsentMembers(absent)
 
@@ -865,6 +819,21 @@ export const AdminDashboard = () => {
               </span>
             </div>
             <div className="p-6">
+              {!NOTIFICATIONS_CONFIGURED && (
+                <div className="mb-4 bg-orange-50 text-warning text-xs font-semibold px-4 py-3 rounded-custom border border-warning/20 flex items-start space-x-2 space-x-reverse">
+                  <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+                  <div className="text-right">
+                    <p className="font-bold">خدمة التنبيهات غير مفعّلة</p>
+                    <p className="opacity-90 mt-0.5">لن يتم إرسال أي تذكير حتى يتم إعداد مفاتيح OneSignal. أزرار الإرسال معطّلة حالياً.</p>
+                  </div>
+                </div>
+              )}
+              {notifError && (
+                <div className="mb-4 bg-red-50 text-danger text-xs font-semibold px-4 py-3 rounded-custom border border-danger/20 flex items-start space-x-2 space-x-reverse">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span className="text-right">{notifError}</span>
+                </div>
+              )}
               {loading ? (
                 <div className="py-6 flex justify-center items-center">
                   <div className="w-6 h-6 border-4 border-red-100 border-t-red-600 rounded-full animate-spin"></div>
@@ -901,8 +870,9 @@ export const AdminDashboard = () => {
                           <span className="truncate">آخر قراءة: {lastDate || 'لم يقرأ بعد'}</span>
                           <button
                             onClick={() => handleSendReminder(member.id, member.name)}
-                            disabled={status === 'sending'}
-                            className={`py-1.5 px-3.5 font-bold rounded-custom text-xs transition-all flex items-center space-x-1 space-x-reverse shrink-0 ${
+                            disabled={status === 'sending' || !NOTIFICATIONS_CONFIGURED}
+                            title={NOTIFICATIONS_CONFIGURED ? 'إرسال تذكير' : 'خدمة التنبيهات غير مهيأة'}
+                            className={`py-1.5 px-3.5 font-bold rounded-custom text-xs transition-all flex items-center space-x-1 space-x-reverse shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
                               status === 'sending'
                                 ? 'bg-red-100 text-red-400 cursor-not-allowed border border-red-200'
                                 : status === 'success'
@@ -1202,10 +1172,11 @@ export const AdminDashboard = () => {
                               )}
 
                               {/* Toggle Role Button */}
-                              <button 
+                              <button
                                 onClick={() => handleToggleRole(acc.id, acc.role)}
-                                className="p-1.5 text-textSecondary hover:text-primary hover:bg-primary-light rounded-custom transition-colors"
-                                title="تغيير الدور"
+                                disabled={isSelf}
+                                className="p-1.5 text-textSecondary hover:text-primary hover:bg-primary-light rounded-custom transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                title={isSelf ? 'لا يمكنك تغيير دورك الخاص' : 'تغيير الدور'}
                               >
                                 <Shield className="w-4 h-4" />
                               </button>
