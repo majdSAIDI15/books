@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react'
+/* eslint-disable react-refresh/only-export-components */
+import { createContext, useContext, useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 
 const AuthContext = createContext({
@@ -7,6 +8,9 @@ const AuthContext = createContext({
   loading: true,
   signOut: () => Promise.resolve(),
   refreshProfile: () => Promise.resolve(),
+  setUser: () => {},
+  setProfile: () => {},
+  setLoading: () => {},
 })
 
 export const AuthProvider = ({ children }) => {
@@ -101,7 +105,7 @@ export const AuthProvider = ({ children }) => {
   }
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, signOut, refreshProfile }}>
+    <AuthContext.Provider value={{ user, profile, loading, signOut, refreshProfile, setUser, setProfile, setLoading }}>
       {children}
     </AuthContext.Provider>
   )

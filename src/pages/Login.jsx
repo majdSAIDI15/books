@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { BookOpen, Mail, Lock, User, AlertCircle, ArrowLeft } from 'lucide-react'
 
 export const Login = () => {
-  const { user, profile, loading } = useAuth()
+  const { user, profile, loading, setUser, setProfile, setLoading } = useAuth()
   const navigate = useNavigate()
 
   const [isRegister, setIsRegister] = useState(false)
@@ -56,28 +56,43 @@ export const Login = () => {
         }
       } else {
         // Sign In flow
+        setLoading(true)
         const { data, error } = await supabase.auth.signInWithPassword({
           email,
           password
         })
 
-        if (error) throw error
+        if (error) {
+          let msg = error.message
+          if (msg === 'Invalid login credentials') {
+            msg = 'البريد الإلكتروني أو كلمة المرور غير صحيحة.'
+          } else if (msg.includes('rate limit')) {
+            msg = 'لقد قمت بمحاولات كثيرة جداً. يرجى المحاولة لاحقاً.'
+          }
+          setErrorMessage(msg)
+          setLoading(false)
+          return
+        }
 
         if (data?.user) {
-          // Fetch role immediately to redirect correctly
-          const { data: prof, error: profError } = await supabase
+          setUser(data.user)
+
+          // Immediately fetch profile and redirect
+          const { data: profileData, error: profileError } = await supabase
             .from('profiles')
-            .select('role')
+            .select('*')
             .eq('id', data.user.id)
             .single()
-          
-          if (profError) throw profError
 
-          if (prof?.role === 'admin') {
-            navigate('/admin')
-          } else {
-            navigate('/member')
+          if (profileError) {
+            setErrorMessage(profileError.message)
+            setLoading(false)
+            return
           }
+
+          setProfile(profileData)
+          navigate(profileData?.role === 'admin' ? '/admin' : '/member')
+          setLoading(false)
         }
       }
     } catch (err) {
@@ -96,6 +111,7 @@ export const Login = () => {
         msg = 'لقد قمت بمحاولات كثيرة جداً. يرجى المحاولة لاحقاً.'
       }
       setErrorMessage(msg)
+      setLoading(false)
     } finally {
       setAuthLoading(false)
     }
