@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
@@ -23,7 +23,9 @@ export const PDFReader = () => {
   const [loading, setLoading] = useState(true)
   const [pdfLoading, setPdfLoading] = useState(true)
   const [loadProgress, setLoadProgress] = useState(0)
+  const [renderedPages, setRenderedPages] = useState({})
   const [error, setError] = useState('')
+  const [versionKey] = useState(() => Date.now())
 
 
   // State to track session progress
@@ -150,6 +152,7 @@ export const PDFReader = () => {
       }
     }
 
+    loadBookAndSession()
   }, [user, bookId])
 
   // Helper to highlight annotations on a specific page
@@ -170,6 +173,7 @@ export const PDFReader = () => {
       spans.forEach(span => {
         const spanText = span.textContent
         if (spanText.includes(textToFind) && !span.querySelector('.custom-pdf-highlight')) {
+          // eslint-disable-next-line no-useless-escape
           const escapedText = textToFind.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
           const regex = new RegExp(`(${escapedText})`, 'gi')
           
@@ -688,6 +692,16 @@ export const PDFReader = () => {
 
   // Scroll to Resume reading page
   const onPageRenderSuccess = (pageNum) => {
+    // Hide pdfLoading spinner as soon as page 1 or initial page is ready
+    if (pageNum === 1 || pageNum === initialPageRef.current) {
+      setPdfLoading(false)
+    }
+
+    setRenderedPages(prev => {
+      if (prev[pageNum]) return prev
+      return { ...prev, [pageNum]: true }
+    })
+
     if (pageNum === initialPageRef.current && !hasScrolledRef.current) {
       hasScrolledRef.current = true
       setTimeout(() => {
@@ -758,6 +772,19 @@ export const PDFReader = () => {
     )
   }
 
+
+  let pdfUrl = book?.pdf_url
+  if (pdfUrl && !pdfUrl.includes('?')) {
+    pdfUrl = `${pdfUrl}?v=${versionKey}`
+  }
+
+  const loadingTask = {
+    url: pdfUrl,
+    rangeChunkSize: 65536,
+    disableAutoFetch: false,
+    disableStream: false,
+  }
+
   return (
     <div className="min-h-screen bg-bgMain flex flex-col justify-between">
       
@@ -798,13 +825,13 @@ export const PDFReader = () => {
       </nav>
 
       {/* Main PDF View Area with Stacked Pages */}
-      <main className="flex-grow flex items-center justify-center p-4 overflow-y-visible">
+      <main className="flex-grow flex items-center justify-center p-4 overflow-y-visible relative">
         <div className="max-w-3xl w-full flex flex-col items-center">
           
           {pdfLoading && (
-            <div className="flex flex-col items-center space-y-3 py-20">
-              <RefreshCw className="w-10 h-10 text-primary animate-spin" />
-              <p className="text-sm text-textSecondary font-semibold animate-pulse">
+            <div className="absolute inset-0 bg-bgMain z-30 flex flex-col justify-center items-center p-4 min-h-[400px]">
+              <RefreshCw className="w-10 h-10 text-primary animate-spin mb-3" />
+              <p className="text-sm text-textSecondary font-semibold animate-pulse mb-3">
                 جاري تحميل الكتاب... {loadProgress > 0 ? `${loadProgress}%` : ''}
               </p>
               {loadProgress > 0 && (
@@ -815,9 +842,9 @@ export const PDFReader = () => {
             </div>
           )}
 
-          <div className={`pdf-container ${pdfLoading ? 'hidden' : 'flex'} flex-col w-full space-y-6 pb-24`}>
+          <div className="pdf-container flex flex-col w-full space-y-6 pb-24">
             <Document
-              file={book.pdf_url}
+              file={loadingTask}
               onDocumentLoadSuccess={onDocumentLoadSuccess}
               onLoadProgress={({ loaded, total }) => {
                 if (total > 0) {
@@ -833,7 +860,7 @@ export const PDFReader = () => {
             >
               {Array.from(new Array(numPages), (el, index) => {
                 const pageNum = index + 1
-                const isNear = Math.abs(pageNum - currentPage) <= 2
+                const isNear = Math.abs(pageNum - currentPage) <= 3
                 const estimatedHeight = pageWidth * 1.414
 
                 return (
@@ -847,6 +874,7 @@ export const PDFReader = () => {
                       <Page 
                         pageNumber={pageNum} 
                         width={pageWidth} 
+                        scale={renderedPages[pageNum] ? 1.5 : 1.0}
                         renderTextLayer={true} 
                         renderAnnotationLayer={false}
                         onRenderSuccess={() => onPageRenderSuccess(pageNum)}
