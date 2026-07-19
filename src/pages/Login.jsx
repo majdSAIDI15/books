@@ -91,7 +91,7 @@ export const Login = () => {
           }
 
           setProfile(profileData)
-          navigate(profileData?.role === 'admin' ? '/admin' : '/member')
+          window.location.href = profileData?.role === 'admin' ? '/admin' : '/member'
           setLoading(false)
         }
       }
