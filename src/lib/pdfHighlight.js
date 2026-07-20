@@ -23,6 +23,17 @@ const COLORS = {
 
 export const highlightColor = (color) => COLORS[color] || COLORS.yellow
 
+// Version opaque, pour l'icône du marqueur (une couleur à 45 % d'opacité sur
+// fond sombre serait à peine visible).
+const SOLID = {
+  yellow: '#FACC15',
+  blue: '#60A5FA',
+  red: '#F87171',
+  green: '#34D399'
+}
+
+export const solidColor = (color) => SOLID[color] || SOLID.yellow
+
 /**
  * Espaces normalisés (les retours à la ligne de pdf.js deviennent des espaces
  * simples), avec la correspondance index normalisé → index brut pour pouvoir

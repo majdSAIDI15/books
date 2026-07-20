@@ -5,17 +5,22 @@ import { useAuth } from '../context/AuthContext'
 import { Document, Page } from 'react-pdf'
 import {
   ArrowRight, BookOpen, AlertTriangle, RefreshCw, FileText, Trash2, X,
-  Bookmark, BookmarkPlus, ChevronUp, ChevronDown
+  Bookmark, BookmarkPlus, ChevronUp, ChevronDown, Highlighter
 } from 'lucide-react'
 import { getLocalDateStr } from '../lib/stats'
-import { applyAnnotation, clearAnnotations, occurrenceIndexOfSelection } from '../lib/pdfHighlight'
+import { applyAnnotation, clearAnnotations, occurrenceIndexOfSelection, solidColor } from '../lib/pdfHighlight'
 import { ANNOTATION_COLORS, colorLabel, cardClasses, dotClasses } from '../lib/annotations'
+import { MarkerLayer } from '../components/MarkerLayer'
 
 // Import text layer styles for text selection
 import 'react-pdf/dist/Page/TextLayer.css'
 
 // Worker pdf.js servi localement (voir src/lib/pdfWorker.js)
 import '../lib/pdfWorker'
+
+// Référence stable : un `[]` littéral en prop casserait la mémoïsation de
+// PdfPageSlot pour toutes les pages sans tracé, à chaque rendu.
+const EMPTY_ZONES = []
 
 /**
  * Une page (rendue ou simple réservation d'espace).
@@ -29,7 +34,10 @@ import '../lib/pdfWorker'
  * l'échelle 1, puis à 1,5 après `onRenderSuccess`, soit 2,25× la surface utile,
  * que le navigateur recompressait ensuite via `max-width: 100%` (§3.3).
  */
-const PdfPageSlot = memo(function PdfPageSlot({ pageNum, isNear, pageWidth, bookmark, onRenderSuccess }) {
+const PdfPageSlot = memo(function PdfPageSlot({
+  pageNum, isNear, pageWidth, bookmark, onRenderSuccess,
+  zones, markerMode, markerColor, onCreateZone, onDeleteZone
+}) {
   const estimatedHeight = pageWidth * 1.414
 
   return (
@@ -50,22 +58,39 @@ const PdfPageSlot = memo(function PdfPageSlot({ pageNum, isNear, pageWidth, book
       )}
 
       {isNear ? (
-        <Page
-          pageNumber={pageNum}
-          width={pageWidth}
-          devicePixelRatio={typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1}
-          renderTextLayer={true}
-          renderAnnotationLayer={false}
-          onRenderSuccess={() => onRenderSuccess(pageNum)}
-          loading={
-            <div
-              className="flex flex-col items-center justify-center bg-white border border-cardBorder rounded-custom animate-pulse shadow-sm"
-              style={{ width: `${pageWidth}px`, height: `${estimatedHeight}px` }}
-            >
-              <div className="w-8 h-8 border-2 border-primary-light border-t-primary rounded-full animate-spin"></div>
-            </div>
-          }
-        />
+        // `relative inline-block` : ce conteneur épouse exactement le canvas
+        // rendu, ce qui permet à la couche marqueur de s'aligner dessus au pixel
+        // près. Le placer sur le wrapper pleine largeur décalerait les zones.
+        <div
+          className="relative inline-block"
+          // En mode marqueur, on neutralise la sélection de texte : sans cela le
+          // glissement surlignerait aussi des mots au passage.
+          style={markerMode ? { userSelect: 'none', WebkitUserSelect: 'none' } : undefined}
+        >
+          <Page
+            pageNumber={pageNum}
+            width={pageWidth}
+            devicePixelRatio={typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1}
+            renderTextLayer={true}
+            renderAnnotationLayer={false}
+            onRenderSuccess={() => onRenderSuccess(pageNum)}
+            loading={
+              <div
+                className="flex flex-col items-center justify-center bg-white border border-cardBorder rounded-custom animate-pulse shadow-sm"
+                style={{ width: `${pageWidth}px`, height: `${estimatedHeight}px` }}
+              >
+                <div className="w-8 h-8 border-2 border-primary-light border-t-primary rounded-full animate-spin"></div>
+              </div>
+            }
+          />
+          <MarkerLayer
+            zones={zones}
+            markerMode={markerMode}
+            markerColor={markerColor}
+            onCreate={(rect) => onCreateZone(pageNum, rect)}
+            onDelete={onDeleteZone}
+          />
+        </div>
       ) : (
         <div
           className="flex flex-col items-center justify-center bg-[#F8F7F4]/40 border border-dashed border-cardBorder/30 rounded-custom transition-all duration-200"
@@ -129,6 +154,10 @@ export const PDFReader = () => {
   // Annotations state
   const [annotations, setAnnotations] = useState([])
   const [bookmarks, setBookmarks] = useState([])
+  // Zones tracées au marqueur (table page_highlights), indépendantes du texte.
+  const [zones, setZones] = useState([])
+  const [markerMode, setMarkerMode] = useState(false)
+  const [markerColor, setMarkerColor] = useState('yellow')
   // Miroir en ref, lu par les callbacks à identité stable (voir onPageRenderSuccess).
   const annotationsRef = useRef([])
   useEffect(() => { annotationsRef.current = annotations }, [annotations])
@@ -348,6 +377,15 @@ export const PDFReader = () => {
         if (bmError) throw bmError
         setBookmarks(bmData || [])
 
+        const { data: zoneData, error: zoneError } = await supabase
+          .from('page_highlights')
+          .select('*')
+          .eq('user_id', user.id)
+          .eq('book_id', bookId)
+
+        if (zoneError) throw zoneError
+        setZones(zoneData || [])
+
         const { data: noteData, error: noteError } = await supabase
           .from('book_notes')
           .select('content')
@@ -509,6 +547,62 @@ export const PDFReader = () => {
       console.error('Error saving annotation:', err.message)
     }
   }
+
+  // ── Marqueur : zones colorées libres ───────────────────────────────────────
+
+  const zonesByPage = useMemo(() => {
+    const map = new Map()
+    zones.forEach(z => {
+      if (!map.has(z.page_number)) map.set(z.page_number, [])
+      map.get(z.page_number).push(z)
+    })
+    return map
+  }, [zones])
+
+  const createZone = useCallback(async (pageNum, rect) => {
+    if (!user || !bookId) return
+
+    // Insertion optimiste : le trait doit apparaître sous le doigt sans attendre
+    // l'aller-retour réseau, sinon le geste paraît ne pas avoir fonctionné.
+    const optimistic = {
+      id: `temp-${Date.now()}`,
+      page_number: pageNum,
+      color: markerColor,
+      ...rect
+    }
+    setZones(prev => [...prev, optimistic])
+
+    try {
+      const { data, error } = await supabase
+        .from('page_highlights')
+        .insert({
+          user_id: user.id,
+          book_id: bookId,
+          page_number: pageNum,
+          x: rect.x, y: rect.y, w: rect.w, h: rect.h,
+          color: markerColor
+        })
+        .select()
+      if (error) throw error
+
+      // On remplace la version optimiste par la ligne réelle (avec son vrai id).
+      setZones(prev => prev.map(z => (z.id === optimistic.id ? data[0] : z)))
+    } catch (err) {
+      console.error('Échec de l\'enregistrement du tracé:', err.message)
+      setZones(prev => prev.filter(z => z.id !== optimistic.id))
+    }
+  }, [user, bookId, markerColor])
+
+  const deleteZone = useCallback(async (zone) => {
+    setZones(prev => prev.filter(z => z.id !== zone.id))
+    try {
+      const { error } = await supabase.from('page_highlights').delete().eq('id', zone.id)
+      if (error) throw error
+    } catch (err) {
+      console.error('Échec de la suppression du tracé:', err.message)
+      setZones(prev => [...prev, zone])
+    }
+  }, [])
 
   // ── Marque-pages manuels ───────────────────────────────────────────────────
   // Table dédiée `bookmarks` depuis la migration 2. Le repérage automatique
@@ -1065,6 +1159,11 @@ export const PDFReader = () => {
                     pageWidth={pageWidth}
                     bookmark={bookmarksByPage.get(pageNum)}
                     onRenderSuccess={onPageRenderSuccess}
+                    zones={zonesByPage.get(pageNum) || EMPTY_ZONES}
+                    markerMode={markerMode}
+                    markerColor={markerColor}
+                    onCreateZone={createZone}
+                    onDeleteZone={deleteZone}
                   />
                 )
               })}
@@ -1073,6 +1172,49 @@ export const PDFReader = () => {
 
         </div>
       </main>
+
+      {/* Marqueur : activation et choix de la couleur */}
+      <div className="fixed left-4 top-1/2 -translate-y-1/2 z-40 flex flex-col items-center gap-2">
+        <button
+          onClick={() => setMarkerMode(m => !m)}
+          aria-pressed={markerMode}
+          aria-label={markerMode ? 'إيقاف قلم التظليل' : 'تفعيل قلم التظليل'}
+          title={markerMode ? 'إيقاف قلم التظليل' : 'قلم التظليل — لتلوين أي منطقة'}
+          className={`p-3 rounded-full shadow-lg transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+            markerColor && markerMode
+              ? 'bg-white ring-2 ring-primary scale-110'
+              : 'bg-[#2C2C2A]/90 text-white hover:bg-[#2C2C2A]'
+          }`}
+          style={markerMode ? { color: solidColor(markerColor) } : undefined}
+        >
+          <Highlighter className="w-5 h-5" />
+        </button>
+
+        {/* Palette dépliée seulement en mode marqueur */}
+        {markerMode && (
+          <div className="flex flex-col gap-1.5 bg-[#2C2C2A]/90 backdrop-blur-sm p-2 rounded-full shadow-lg border border-white/10">
+            {ANNOTATION_COLORS.map(c => (
+              <button
+                key={c.key}
+                onClick={() => setMarkerColor(c.key)}
+                aria-label={`لون ${c.label}`}
+                aria-pressed={markerColor === c.key}
+                title={c.label}
+                className={`w-6 h-6 rounded-full ${c.bg} transition-transform hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-white ${
+                  markerColor === c.key ? 'ring-2 ring-white ring-offset-2 ring-offset-[#2C2C2A] scale-110' : ''
+                }`}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Rappel discret du mode actif */}
+      {markerMode && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-40 bg-[#2C2C2A]/90 text-white text-[11px] font-semibold px-4 py-2 rounded-full shadow-lg backdrop-blur-sm pointer-events-none">
+          اسحب لتلوين منطقة · انقر على تظليل لحذفه
+        </div>
+      )}
 
       {/* Barre flottante : navigation par page, marque-pages, saut direct */}
       <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 bg-[#2C2C2A]/90 text-white py-2 px-3 rounded-full text-xs font-bold shadow-lg backdrop-blur-sm flex items-center gap-2 border border-[#E0DED6]/20">
