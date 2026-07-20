@@ -1,8 +1,9 @@
 import { lazy, Suspense } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { AuthProvider } from './context/AuthContext'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { InstallPrompt } from './components/InstallPrompt'
 import { Login } from './pages/Login'
 import { AlertCircle } from 'lucide-react'
 
@@ -18,6 +19,14 @@ const MemberDashboard = lazy(() =>
 const PDFReader = lazy(() =>
   import('./pages/PDFReader').then(m => ({ default: m.PDFReader }))
 )
+
+// L'invitation à installer est masquée pendant la lecture : elle recouvrirait
+// la page du livre et les commandes flottantes du lecteur.
+const InstallPromptGate = () => {
+  const { pathname } = useLocation()
+  if (pathname.startsWith('/member/read/')) return null
+  return <InstallPrompt />
+}
 
 const RouteFallback = () => (
   <div className="min-h-screen bg-bgMain flex justify-center items-center">
@@ -93,6 +102,7 @@ function App() {
               <Route path="*" element={<Navigate to="/login" replace />} />
             </Routes>
           </Suspense>
+          <InstallPromptGate />
         </ErrorBoundary>
       </AuthProvider>
     </BrowserRouter>

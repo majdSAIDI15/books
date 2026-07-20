@@ -3,8 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- `viewport-fit=cover` : sur iPhone à encoche, la page occupe tout
+         l'écran ; les zones sûres sont gérées en CSS (env(safe-area-inset-*)). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>متابع القراءة - تتبع تقدمك في قراءة الكتب</title>
+
+    <!-- Couleur de la barre système une fois l'app installée -->
+    <meta name="theme-color" content="#534AB7" />
+
+    <!-- iOS ignore le manifeste : il lui faut ses propres balises, sans quoi
+         « Ajouter à l'écran d'accueil » produit un simple raccourci Safari,
+         avec barre d'adresse et sans icône. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="مكتبتي" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <!-- Google Fonts: Noto Naskh Arabic -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

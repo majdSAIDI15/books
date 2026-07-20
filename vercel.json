@@ -1,8 +1,24 @@
 {
   "rewrites": [
     {
-      "source": "/(.*)",
+      "//": "Le routage client impose de renvoyer index.html pour les URL inconnues, MAIS les fichiers de la PWA doivent être servis tels quels : un manifeste ou un service worker qui renverrait du HTML rend l'application non installable, sans message d'erreur explicite.",
+      "source": "/((?!assets/|icons/|manifest\\.webmanifest|sw\\.js|workbox-.*\\.js|registerSW\\.js|favicon\\.svg|OneSignalSDKWorker\\.js).*)",
       "destination": "/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "//": "Le service worker ne doit jamais être servi depuis le cache : sinon les utilisateurs restent bloqués sur une ancienne version de l'app.",
+      "source": "/sw.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/manifest.webmanifest",
+      "headers": [
+        { "key": "Content-Type", "value": "application/manifest+json" }
+      ]
     }
   ]
 }

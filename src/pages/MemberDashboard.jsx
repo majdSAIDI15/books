@@ -464,7 +464,11 @@ export const MemberDashboard = () => {
               لا توجد كتب متاحة في هذا التصنيف حالياً.
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            // Deux colonnes dès le plus petit écran : une carte pleine largeur
+            // ne laissait voir qu'un seul livre à la fois, ce qui donne
+            // l'impression d'une bibliothèque vide. Gouttière resserrée en
+            // dessous de 640 px pour compenser la place perdue.
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6">
               {filteredBooks.map(book => (
                 <BookCard
                   key={book.id}
