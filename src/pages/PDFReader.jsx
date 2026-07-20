@@ -1,16 +1,82 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
-import { Document, Page, pdfjs } from 'react-pdf'
-import { ArrowRight, BookOpen, AlertTriangle, RefreshCw, FileText, Trash2, X } from 'lucide-react'
+import { Document, Page } from 'react-pdf'
+import {
+  ArrowRight, BookOpen, AlertTriangle, RefreshCw, FileText, Trash2, X,
+  Bookmark, BookmarkPlus, ChevronUp, ChevronDown
+} from 'lucide-react'
 import { getLocalDateStr } from '../lib/stats'
+import { applyAnnotation, clearAnnotations, occurrenceIndexOfSelection } from '../lib/pdfHighlight'
+import { ANNOTATION_COLORS, colorLabel, cardClasses, dotClasses } from '../lib/annotations'
 
 // Import text layer styles for text selection
 import 'react-pdf/dist/Page/TextLayer.css'
 
-// Set PDF.js worker from CDN to avoid packaging issues
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version || '3.11.174'}/build/pdf.worker.min.mjs`
+// Worker pdf.js servi localement (voir src/lib/pdfWorker.js)
+import '../lib/pdfWorker'
+
+/**
+ * Une page (rendue ou simple réservation d'espace).
+ *
+ * Mémoïsé : la liste complète était reconstruite à chaque changement de page au
+ * défilement — 800 éléments React recréés par page franchie sur un gros livre
+ * (§3.4). Ici seules les pages dont `isNear` bascule se re-rendent.
+ *
+ * `scale` a disparu au profit de `devicePixelRatio` : react-pdf multipliait
+ * `width` par `scale`, donc chaque page était rasterisée deux fois — une fois à
+ * l'échelle 1, puis à 1,5 après `onRenderSuccess`, soit 2,25× la surface utile,
+ * que le navigateur recompressait ensuite via `max-width: 100%` (§3.3).
+ */
+const PdfPageSlot = memo(function PdfPageSlot({ pageNum, isNear, pageWidth, bookmark, onRenderSuccess }) {
+  const estimatedHeight = pageWidth * 1.414
+
+  return (
+    <div
+      data-page-number={pageNum}
+      className="page-wrapper flex justify-center w-full my-3 relative"
+      style={{ minHeight: isNear ? 'auto' : `${estimatedHeight}px` }}
+    >
+      {bookmark && (
+        <div
+          className="absolute top-0 left-2 z-10 flex items-center gap-1 px-2 py-1 rounded-b-custom shadow-sm text-white text-[10px] font-bold pointer-events-none"
+          style={{ backgroundColor: 'rgba(83, 74, 183, 0.9)' }}
+          title={bookmark.label || `صفحة ${pageNum}`}
+        >
+          <Bookmark className="w-3 h-3 fill-current" />
+          {bookmark.label && <span className="max-w-[140px] truncate">{bookmark.label}</span>}
+        </div>
+      )}
+
+      {isNear ? (
+        <Page
+          pageNumber={pageNum}
+          width={pageWidth}
+          devicePixelRatio={typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1}
+          renderTextLayer={true}
+          renderAnnotationLayer={false}
+          onRenderSuccess={() => onRenderSuccess(pageNum)}
+          loading={
+            <div
+              className="flex flex-col items-center justify-center bg-white border border-cardBorder rounded-custom animate-pulse shadow-sm"
+              style={{ width: `${pageWidth}px`, height: `${estimatedHeight}px` }}
+            >
+              <div className="w-8 h-8 border-2 border-primary-light border-t-primary rounded-full animate-spin"></div>
+            </div>
+          }
+        />
+      ) : (
+        <div
+          className="flex flex-col items-center justify-center bg-[#F8F7F4]/40 border border-dashed border-cardBorder/30 rounded-custom transition-all duration-200"
+          style={{ width: `${pageWidth}px`, height: `${estimatedHeight}px` }}
+        >
+          <span className="text-xs text-textSecondary/40 font-semibold">صفحة {pageNum}</span>
+        </div>
+      )}
+    </div>
+  )
+})
 
 
 export const PDFReader = () => {
@@ -21,10 +87,13 @@ export const PDFReader = () => {
   const [book, setBook] = useState(null)
   const [numPages, setNumPages] = useState(null)
   const [currentPage, setCurrentPage] = useState(1)
+  // Champ « aller à la page » : `null` hors édition, auquel cas il affiche la
+  // page courante. Valeur dérivée plutôt que synchronisée par un effet, ce qui
+  // éviterait un setState en cascade à chaque page franchie au défilement.
+  const [pageInput, setPageInput] = useState(null)
   const [loading, setLoading] = useState(true)
   const [pdfLoading, setPdfLoading] = useState(true)
   const [loadProgress, setLoadProgress] = useState(0)
-  const [renderedPages, setRenderedPages] = useState({})
   const [error, setError] = useState('')
 
 
@@ -59,9 +128,14 @@ export const PDFReader = () => {
 
   // Annotations state
   const [annotations, setAnnotations] = useState([])
+  const [bookmarks, setBookmarks] = useState([])
+  // Miroir en ref, lu par les callbacks à identité stable (voir onPageRenderSuccess).
+  const annotationsRef = useRef([])
+  useEffect(() => { annotationsRef.current = annotations }, [annotations])
   const [selectionState, setSelectionState] = useState({
     text: '',
     pageNum: null,
+    matchIndex: 0,
     rect: null,
     showToolbar: false,
     color: 'yellow',
@@ -97,14 +171,67 @@ export const PDFReader = () => {
     return baselineTodayRef.current + delta
   }, [])
 
-  // Handle responsive width adjustment
+  // Handle responsive width adjustment.
+  // Debounce : chaque changement de `pageWidth` invalide le rendu de toutes les
+  // pages montées. Sans cela, un redimensionnement de fenêtre en déclenche des
+  // dizaines à la suite.
   useEffect(() => {
+    let timer = null
     const handleResize = () => {
-      setPageWidth(window.innerWidth > 768 ? 650 : window.innerWidth - 32)
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        setPageWidth(window.innerWidth > 768 ? 650 : window.innerWidth - 32)
+      }, 150)
     }
     window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('resize', handleResize)
+    }
   }, [])
+
+  const scrollToPage = useCallback((pageNum) => {
+    const el = document.querySelector(`.page-wrapper[data-page-number="${pageNum}"]`)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
+
+  // Navigation au clavier (§6.2) : le seul moyen de se déplacer dans un livre
+  // de 800 pages était le défilement.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      // Ne pas détourner les touches quand l'utilisateur écrit (notes, saut de
+      // page, commentaire d'annotation).
+      const tag = e.target.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+
+      switch (e.key) {
+        case 'ArrowRight':
+        case 'PageUp':
+          e.preventDefault()
+          scrollToPage(Math.max(1, currentPageRef.current - 1))
+          break
+        case 'ArrowLeft':
+        case 'PageDown':
+          e.preventDefault()
+          scrollToPage(Math.min(numPages || 1, currentPageRef.current + 1))
+          break
+        case 'Home':
+          e.preventDefault()
+          scrollToPage(1)
+          break
+        case 'End':
+          e.preventDefault()
+          if (numPages) scrollToPage(numPages)
+          break
+        default:
+          break
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [numPages, scrollToPage])
 
   // Toast auto-hide
   useEffect(() => {
@@ -137,21 +264,25 @@ export const PDFReader = () => {
         // 2. Fetch user's reading session for this book
         const { data: dbSession, error: sessionErr } = await supabase
           .from('reading_sessions')
-          .select('last_page')
+          .select('last_page, max_page')
           .eq('user_id', user.id)
           .eq('book_id', bookId)
-          .single()
+          .maybeSingle()
 
         let startPage = 1
+        let maxPage = 1
         if (!sessionErr && dbSession) {
           startPage = dbSession.last_page || 1
+          // Sans cette reprise, revenir en arrière puis fermer le livre
+          // écraserait la progression maximale par la position courante.
+          maxPage = Math.max(dbSession.max_page || 1, startPage)
         }
-        
+
         setCurrentPage(startPage)
         currentPageRef.current = startPage
         initialPageRef.current = startPage
-        maxPageReachedRef.current = startPage
-        sessionStartPageRef.current = startPage
+        maxPageReachedRef.current = maxPage
+        sessionStartPageRef.current = maxPage
 
         // 3. Fetch user's daily log read count for today
         const todayStr = getLocalDateStr()
@@ -177,73 +308,20 @@ export const PDFReader = () => {
     loadBookAndSession()
   }, [user, bookId])
 
-  // Helper to highlight annotations on a specific page
-  const highlightSavedAnnotationsOnPage = (pageNum, pageAnnotations) => {
-    const pageEl = document.querySelector(`[data-page-number="${pageNum}"]`)
-    if (!pageEl || !pageAnnotations || pageAnnotations.length === 0) return
+  const pageElement = (pageNum) =>
+    document.querySelector(`.page-wrapper[data-page-number="${pageNum}"]`)
 
-    const textLayer = pageEl.querySelector('.react-pdf__Page__textContent')
-    if (!textLayer) return
-
-    const spans = Array.from(textLayer.querySelectorAll('span'))
-    if (spans.length === 0) return
-
-    pageAnnotations.forEach(ann => {
-      const textToFind = ann.selected_text.trim()
-      if (!textToFind) return
-
-      spans.forEach(span => {
-        const spanText = span.textContent
-        if (spanText.includes(textToFind) && !span.querySelector('.custom-pdf-highlight')) {
-          // eslint-disable-next-line no-useless-escape
-          const escapedText = textToFind.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
-          const regex = new RegExp(`(${escapedText})`, 'gi')
-          
-          let bgStyle = 'rgba(253, 224, 71, 0.45)' // yellow
-          if (ann.color === 'blue') bgStyle = 'rgba(147, 197, 253, 0.45)'
-          else if (ann.color === 'red') bgStyle = 'rgba(252, 165, 165, 0.45)'
-          else if (ann.color === 'green') bgStyle = 'rgba(110, 231, 183, 0.45)' // green
-
-          span.innerHTML = spanText.replace(
-            regex,
-            `<mark class="custom-pdf-highlight rounded-[2px]" style="background-color: ${bgStyle}; color: inherit; padding: 1px 0;">$1</mark>`
-          )
-        }
-      })
-    })
-  }
-
-  const clearHighlightsOnPage = (pageNum) => {
-    const pageEl = document.querySelector(`[data-page-number="${pageNum}"]`)
-    if (!pageEl) return
-    const textLayer = pageEl.querySelector('.react-pdf__Page__textContent')
-    if (!textLayer) return
-
-    const highlights = textLayer.querySelectorAll('.custom-pdf-highlight')
-    highlights.forEach(hl => {
-      const parent = hl.parentNode
-      if (parent) {
-        parent.replaceChild(document.createTextNode(hl.textContent), hl)
-        parent.normalize()
-      }
-    })
-  }
-
-  const highlightSavedAnnotations = (list = annotations) => {
+  // Rejoue les surlignages sur toutes les pages actuellement montées.
+  // Les marque-pages n'ont pas de texte associé et ne touchent pas la couche texte.
+  const highlightMountedPages = useCallback((list) => {
     if (!list || list.length === 0) return
-    
-    const pageElements = document.querySelectorAll('.page-wrapper')
-    pageElements.forEach(pageEl => {
-      const pageNumAttr = pageEl.getAttribute('data-page-number')
-      if (!pageNumAttr) return
-      const pageNum = parseInt(pageNumAttr, 10)
-      
-      const pageAnnotations = list.filter(ann => ann.page_number === pageNum)
-      if (pageAnnotations.length > 0) {
-        highlightSavedAnnotationsOnPage(pageNum, pageAnnotations)
-      }
+    document.querySelectorAll('.page-wrapper[data-page-number]').forEach(pageEl => {
+      const pageNum = parseInt(pageEl.getAttribute('data-page-number'), 10)
+      list
+        .filter(ann => ann.page_number === pageNum)
+        .forEach(ann => applyAnnotation(pageEl, ann))
     })
-  }
+  }, [])
 
   // Load annotations and notes
   useEffect(() => {
@@ -259,6 +337,16 @@ export const PDFReader = () => {
 
         if (annError) throw annError
         setAnnotations(annData || [])
+
+        const { data: bmData, error: bmError } = await supabase
+          .from('bookmarks')
+          .select('*')
+          .eq('user_id', user.id)
+          .eq('book_id', bookId)
+          .order('page_number', { ascending: true })
+
+        if (bmError) throw bmError
+        setBookmarks(bmData || [])
 
         const { data: noteData, error: noteError } = await supabase
           .from('book_notes')
@@ -285,11 +373,11 @@ export const PDFReader = () => {
   useEffect(() => {
     if (!pdfLoading && annotations.length > 0) {
       const timer = setTimeout(() => {
-        highlightSavedAnnotations(annotations)
+        highlightMountedPages(annotations)
       }, 500)
       return () => clearTimeout(timer)
     }
-  }, [pdfLoading, annotations])
+  }, [pdfLoading, annotations, highlightMountedPages])
 
   // Selection detection
   useEffect(() => {
@@ -321,9 +409,14 @@ export const PDFReader = () => {
       const range = selection.getRangeAt(0)
       const rect = range.getBoundingClientRect()
 
+      // Rang de l'occurrence, calculé MAINTENANT : la sélection du navigateur
+      // n'existera plus au moment de l'enregistrement (§2.11).
+      const matchIndex = occurrenceIndexOfSelection(pageElement(pageNum), range, text)
+
       setSelectionState({
         text,
         pageNum,
+        matchIndex,
         rect: {
           clientY: rect.top,
           clientX: rect.left,
@@ -380,6 +473,7 @@ export const PDFReader = () => {
           book_id: bookId,
           page_number: selectionState.pageNum,
           selected_text: selectionState.text,
+          match_index: selectionState.matchIndex || 0,
           color: color,
           comment: comment || null
         })
@@ -389,18 +483,17 @@ export const PDFReader = () => {
 
       if (data && data[0]) {
         const newAnn = data[0]
-        setAnnotations(prev => {
-          const updated = [...prev, newAnn]
-          setTimeout(() => {
-            highlightSavedAnnotationsOnPage(newAnn.page_number, [newAnn])
-          }, 100)
-          return updated
-        })
+        setAnnotations(prev => [...prev, newAnn])
+        setTimeout(() => {
+          const pageEl = pageElement(newAnn.page_number)
+          if (pageEl) applyAnnotation(pageEl, newAnn)
+        }, 100)
       }
 
       setSelectionState({
         text: '',
         pageNum: null,
+        matchIndex: 0,
         rect: null,
         showToolbar: false,
         color: 'yellow',
@@ -417,6 +510,80 @@ export const PDFReader = () => {
     }
   }
 
+  // ── Marque-pages manuels ───────────────────────────────────────────────────
+  // Table dédiée `bookmarks` depuis la migration 2. Le repérage automatique
+  // (`reading_sessions.last_page`) reste indépendant : ces marque-pages sont des
+  // points de retour choisis, multiples et nommables.
+
+  const highlights = annotations
+
+  const bookmarksByPage = useMemo(() => {
+    const map = new Map()
+    bookmarks.forEach(b => { if (!map.has(b.page_number)) map.set(b.page_number, b) })
+    return map
+  }, [bookmarks])
+
+  const currentBookmark = bookmarksByPage.get(currentPage)
+
+  const addBookmark = async (label = '') => {
+    if (!user || !bookId || currentBookmark) return
+    try {
+      const { data, error } = await supabase
+        .from('bookmarks')
+        .insert({
+          user_id: user.id,
+          book_id: bookId,
+          page_number: currentPage,
+          label: label.trim() || null
+        })
+        .select()
+      if (error) throw error
+      if (data?.[0]) {
+        setBookmarks(prev => [...prev, data[0]].sort((a, b) => a.page_number - b.page_number))
+      }
+      setToastMessage('تمت إضافة الإشارة المرجعية ✓')
+      setShowToast(true)
+    } catch (err) {
+      console.error('Erreur lors de l\'ajout du marque-page:', err.message)
+    }
+  }
+
+  const removeBookmark = async (bookmark) => {
+    if (!bookmark) return
+    try {
+      const { error } = await supabase.from('bookmarks').delete().eq('id', bookmark.id)
+      if (error) throw error
+      setBookmarks(prev => prev.filter(b => b.id !== bookmark.id))
+      setToastMessage('تم حذف الإشارة المرجعية ✓')
+      setShowToast(true)
+    } catch (err) {
+      console.error('Erreur lors de la suppression du marque-page:', err.message)
+    }
+  }
+
+  const renameBookmark = async (bookmark, label) => {
+    try {
+      const { error } = await supabase
+        .from('bookmarks')
+        .update({ label: label.trim() || null })
+        .eq('id', bookmark.id)
+      if (error) throw error
+      setBookmarks(prev =>
+        prev.map(b => (b.id === bookmark.id ? { ...b, label: label.trim() || null } : b))
+      )
+    } catch (err) {
+      console.error('Erreur lors du renommage du marque-page:', err.message)
+    }
+  }
+
+  /** Marque-page précédent / suivant par rapport à la page courante. */
+  const jumpToAdjacentBookmark = (direction) => {
+    const target = direction === 'next'
+      ? bookmarks.find(b => b.page_number > currentPage)
+      : [...bookmarks].reverse().find(b => b.page_number < currentPage)
+    if (target) scrollToPage(target.page_number)
+  }
+
   // Delete annotation from Supabase
   const deleteAnnotation = async (ann) => {
     if (!user) return
@@ -429,15 +596,12 @@ export const PDFReader = () => {
 
       if (error) throw error
 
-      setAnnotations(prev => {
-        const updated = prev.filter(item => item.id !== ann.id)
-        clearHighlightsOnPage(ann.page_number)
-        const pageAnnotations = updated.filter(item => item.page_number === ann.page_number)
-        if (pageAnnotations.length > 0) {
-          highlightSavedAnnotationsOnPage(ann.page_number, pageAnnotations)
-        }
-        return updated
-      })
+      // Retrait ciblé : les autres surlignages de la page restent en place,
+      // plus besoin de tout effacer puis tout reposer.
+      const pageEl = pageElement(ann.page_number)
+      if (pageEl) clearAnnotations(pageEl, ann.id)
+
+      setAnnotations(prev => prev.filter(item => item.id !== ann.id))
 
     } catch (err) {
       console.error('Error deleting annotation:', err.message)
@@ -463,13 +627,14 @@ export const PDFReader = () => {
   const saveNotesToDatabase = async (content) => {
     if (!user || !bookId) return
     try {
+      // `updated_at` est renseigné par un trigger côté base (§5.5) : l'écrire
+      // depuis le navigateur exposait le tri à une horloge cliente décalée.
       const { error } = await supabase
         .from('book_notes')
         .upsert({
           user_id: user.id,
           book_id: bookId,
-          content: content,
-          updated_at: new Date().toISOString()
+          content: content
         }, { onConflict: 'user_id,book_id' })
 
       if (error) throw error
@@ -492,8 +657,7 @@ export const PDFReader = () => {
         supabase.from('book_notes').upsert({
           user_id: user.id,
           book_id: bookId,
-          content: finalVal,
-          updated_at: new Date().toISOString()
+          content: finalVal
         }, { onConflict: 'user_id,book_id' }).then(({ error }) => {
           if (error) console.error('Error saving notes on unmount:', error.message)
         })
@@ -524,6 +688,13 @@ export const PDFReader = () => {
     if (!user || !bookId) return false
 
     const todayStr = getLocalDateStr()
+    // Deux notions distinctes depuis la migration 2 (§2.10) :
+    //   last_page → position réelle, pour rouvrir au bon endroit
+    //   max_page  → le plus loin atteint, pour le pourcentage de progression
+    // Relire un chapitre antérieur ne fait donc plus reculer la barre.
+    // `updated_at` n'est plus envoyé : un trigger le renseigne côté base, ce qui
+    // évite qu'une horloge cliente décalée fausse le tri du « livre en cours » (§5.5).
+    const currentPos = currentPageRef.current
     const maxReached = maxPageReachedRef.current
     const pagesReadToday = computePagesReadToday(todayStr)
     if (pagesReadToday === null) return false
@@ -535,8 +706,8 @@ export const PDFReader = () => {
           {
             user_id: user.id,
             book_id: bookId,
-            last_page: maxReached,
-            updated_at: new Date().toISOString()
+            last_page: currentPos,
+            max_page: maxReached
           },
           { onConflict: 'user_id,book_id' }
         )
@@ -574,6 +745,7 @@ export const PDFReader = () => {
     if (!token) return
 
     const todayStr = getLocalDateStr()
+    const currentPos = currentPageRef.current
     const maxReached = maxPageReachedRef.current
     const pagesReadToday = computePagesReadToday(todayStr)
     if (pagesReadToday === null) return
@@ -594,8 +766,8 @@ export const PDFReader = () => {
       body: JSON.stringify({
         user_id: user.id,
         book_id: bookId,
-        last_page: maxReached,
-        updated_at: new Date().toISOString()
+        last_page: currentPos,
+        max_page: maxReached
       }),
       keepalive: true
     }).catch(() => {})
@@ -639,27 +811,35 @@ export const PDFReader = () => {
   }
 
   // Track page change and save progress to Supabase after 3 seconds stay
-  const handlePageChange = async (newPage) => {
+  const handlePageChange = useCallback((newPage) => {
     if (!user || !bookId || newPage < 1 || (numPages && newPage > numPages)) return
 
     setCurrentPage(newPage)
     currentPageRef.current = newPage
-    
-    // Only update maxPageReachedRef and set pending save if it's a new high page
+
+    // La progression maximale ne sert plus qu'au calcul des pages lues du jour.
     if (newPage > maxPageReachedRef.current) {
       maxPageReachedRef.current = newPage
-      pendingSaveRef.current = true
-      
-      // Debounce database write for 3 seconds
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current)
-      }
-      
-      saveTimeoutRef.current = setTimeout(() => {
-        saveProgressToDatabase()
-      }, 3000)
     }
-  }
+
+    // Tout déplacement est désormais sauvegardé, y compris vers l'arrière :
+    // c'est la condition pour que la position de reprise soit fidèle (§2.10).
+    // L'ancienne garde `newPage > maxPageReached` ne persistait jamais un retour
+    // en arrière.
+    pendingSaveRef.current = true
+
+    // Debounce database write for 3 seconds
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current)
+    }
+
+    saveTimeoutRef.current = setTimeout(() => {
+      saveProgressToDatabase()
+    }, 3000)
+    // `saveProgressToDatabase` est volontairement hors dépendances : elle est
+    // appelée de façon différée et lit tout son état via des refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, bookId, numPages])
 
   const onDocumentLoadSuccess = ({ numPages }) => {
     setNumPages(numPages)
@@ -710,38 +890,35 @@ export const PDFReader = () => {
         observerRef.current.disconnect()
       }
     }
-  }, [pdfLoading, numPages])
+  }, [pdfLoading, numPages, handlePageChange])
 
-  // Scroll to Resume reading page
-  const onPageRenderSuccess = (pageNum) => {
+  // Scroll to Resume reading page.
+  // `useCallback` avec une référence stable : cette fonction est passée à chaque
+  // <PdfPageSlot> mémoïsé, une nouvelle identité à chaque rendu annulerait tout
+  // le bénéfice de React.memo. D'où la lecture des annotations via une ref.
+  const onPageRenderSuccess = useCallback((pageNum) => {
     // Hide pdfLoading spinner as soon as page 1 or initial page is ready
     if (pageNum === 1 || pageNum === initialPageRef.current) {
       setPdfLoading(false)
     }
 
-    setRenderedPages(prev => {
-      if (prev[pageNum]) return prev
-      return { ...prev, [pageNum]: true }
-    })
-
     if (pageNum === initialPageRef.current && !hasScrolledRef.current) {
       hasScrolledRef.current = true
       setTimeout(() => {
-        const el = document.querySelector(`[data-page-number="${pageNum}"]`)
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        }
+        const el = pageElement(pageNum)
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
       }, 100)
     }
 
     // Apply highlighting for this page when it renders
-    const pageAnnotations = annotations.filter(ann => ann.page_number === pageNum)
-    if (pageAnnotations.length > 0) {
-      setTimeout(() => {
-        highlightSavedAnnotationsOnPage(pageNum, pageAnnotations)
-      }, 100)
-    }
-  }
+    setTimeout(() => {
+      const pageEl = pageElement(pageNum)
+      if (!pageEl) return
+      annotationsRef.current
+        .filter(ann => ann.page_number === pageNum)
+        .forEach(ann => applyAnnotation(pageEl, ann))
+    }, 100)
+  }, [])
 
 
   // Fallback Scroll to Resume if page rendering events trigger unevenly
@@ -757,13 +934,6 @@ export const PDFReader = () => {
       return () => clearTimeout(timer)
     }
   }, [pdfLoading, numPages])
-
-  const scrollToPage = (pageNum) => {
-    const el = document.querySelector(`[data-page-number="${pageNum}"]`)
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
-  }
 
   /**
    * react-pdf compare la prop `file` par IDENTITÉ. Un objet littéral recréé à
@@ -841,7 +1011,7 @@ export const PDFReader = () => {
               <FileText className="w-4 h-4" />
               <span>ملاحظاتي</span>
               {annotations.length > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[9px] font-bold rounded-full w-4.5 h-4.5 flex items-center justify-center shadow-sm px-1">
+                <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[9px] font-bold rounded-full w-[18px] h-[18px] flex items-center justify-center shadow-sm">
                   {annotations.length}
                 </span>
               )}
@@ -872,7 +1042,7 @@ export const PDFReader = () => {
           <div className="pdf-container flex flex-col w-full space-y-6 pb-24">
             <Document
               file={documentFile}
-              onDocumentLoadSuccess={onDocumentLoadSuccess}
+              onLoadSuccess={onDocumentLoadSuccess}
               onLoadProgress={({ loaded, total }) => {
                 if (total > 0) {
                   setLoadProgress(Math.round((loaded / total) * 100))
@@ -885,42 +1055,17 @@ export const PDFReader = () => {
                 </div>
               }
             >
-              {Array.from(new Array(numPages), (el, index) => {
+              {Array.from({ length: numPages || 0 }, (el, index) => {
                 const pageNum = index + 1
-                const isNear = Math.abs(pageNum - currentPage) <= 3
-                const estimatedHeight = pageWidth * 1.414
-
                 return (
-                  <div 
-                    key={index} 
-                    data-page-number={pageNum} 
-                    className="page-wrapper flex justify-center w-full my-3"
-                    style={{ minHeight: isNear ? 'auto' : `${estimatedHeight}px` }}
-                  >
-                    {isNear ? (
-                      <Page 
-                        pageNumber={pageNum} 
-                        width={pageWidth} 
-                        scale={renderedPages[pageNum] ? 1.5 : 1.0}
-                        renderTextLayer={true} 
-                        renderAnnotationLayer={false}
-                        onRenderSuccess={() => onPageRenderSuccess(pageNum)}
-
-                        loading={
-                          <div className="flex flex-col items-center justify-center bg-white border border-cardBorder rounded-custom animate-pulse shadow-sm" style={{ width: `${pageWidth}px`, height: `${estimatedHeight}px` }}>
-                            <div className="w-8 h-8 border-2 border-primary-light border-t-primary rounded-full animate-spin"></div>
-                          </div>
-                        }
-                      />
-                    ) : (
-                      <div 
-                        className="flex flex-col items-center justify-center bg-[#F8F7F4]/40 border border-dashed border-cardBorder/30 rounded-custom transition-all duration-200" 
-                        style={{ width: `${pageWidth}px`, height: `${estimatedHeight}px` }}
-                      >
-                        <span className="text-xs text-textSecondary/40 font-semibold">صفحة {pageNum}</span>
-                      </div>
-                    )}
-                  </div>
+                  <PdfPageSlot
+                    key={pageNum}
+                    pageNum={pageNum}
+                    isNear={Math.abs(pageNum - currentPage) <= 3}
+                    pageWidth={pageWidth}
+                    bookmark={bookmarksByPage.get(pageNum)}
+                    onRenderSuccess={onPageRenderSuccess}
+                  />
                 )
               })}
             </Document>
@@ -929,10 +1074,66 @@ export const PDFReader = () => {
         </div>
       </main>
 
-      {/* Fixed Page Indicator (Floating Pill at Bottom Center) */}
-      <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 bg-[#2C2C2A]/90 text-white py-2 px-5 rounded-full text-xs font-bold shadow-lg backdrop-blur-sm pointer-events-none flex items-center space-x-1.5 space-x-reverse border border-[#E0DED6]/20">
+      {/* Barre flottante : navigation par page, marque-pages, saut direct */}
+      <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 bg-[#2C2C2A]/90 text-white py-2 px-3 rounded-full text-xs font-bold shadow-lg backdrop-blur-sm flex items-center gap-2 border border-[#E0DED6]/20">
+
+        {/* Marque-page précédent */}
+        <button
+          onClick={() => jumpToAdjacentBookmark('prev')}
+          disabled={!bookmarks.some(b => b.page_number < currentPage)}
+          aria-label="الإشارة المرجعية السابقة"
+          title="الإشارة المرجعية السابقة"
+          className="p-1 rounded-full hover:bg-white/15 disabled:opacity-25 disabled:cursor-not-allowed transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          <ChevronUp className="w-4 h-4" />
+        </button>
+
+        {/* Ajouter / retirer un marque-page sur la page courante */}
+        <button
+          onClick={() => (currentBookmark ? removeBookmark(currentBookmark) : addBookmark())}
+          aria-label={currentBookmark ? 'حذف الإشارة المرجعية' : 'إضافة إشارة مرجعية'}
+          title={currentBookmark ? 'حذف الإشارة المرجعية' : 'إضافة إشارة مرجعية لهذه الصفحة'}
+          className={`p-1.5 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${
+            currentBookmark ? 'text-amber-300 hover:bg-white/15' : 'hover:bg-white/15'
+          }`}
+        >
+          {currentBookmark
+            ? <Bookmark className="w-4 h-4 fill-current" />
+            : <BookmarkPlus className="w-4 h-4" />}
+        </button>
+
+        {/* Marque-page suivant */}
+        <button
+          onClick={() => jumpToAdjacentBookmark('next')}
+          disabled={!bookmarks.some(b => b.page_number > currentPage)}
+          aria-label="الإشارة المرجعية التالية"
+          title="الإشارة المرجعية التالية"
+          className="p-1 rounded-full hover:bg-white/15 disabled:opacity-25 disabled:cursor-not-allowed transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          <ChevronDown className="w-4 h-4" />
+        </button>
+
+        <span className="w-px h-4 bg-white/20"></span>
+
+        {/* Saut direct à une page (§6.2) */}
         <span>صفحة</span>
-        <span className="text-[#EEEDFE]">{currentPage}</span>
+        <input
+          type="number"
+          min="1"
+          max={numPages || 1}
+          value={pageInput ?? currentPage}
+          onChange={(e) => setPageInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              const target = parseInt(pageInput, 10)
+              if (target >= 1 && target <= (numPages || 1)) scrollToPage(target)
+              e.currentTarget.blur()
+            }
+          }}
+          onBlur={() => setPageInput(null)}
+          aria-label="الانتقال إلى صفحة"
+          className="w-12 bg-white/10 border border-white/20 rounded text-center text-[#EEEDFE] py-0.5 focus:outline-none focus:ring-1 focus:ring-white/70 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+        />
         <span className="opacity-60">/</span>
         <span className="opacity-80">{numPages || '...'}</span>
       </div>
@@ -983,19 +1184,15 @@ export const PDFReader = () => {
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-white/70 font-bold">لون التظليل:</span>
             <div className="flex items-center space-x-2 space-x-reverse">
-              {[
-                { key: 'yellow', emoji: '🟡', bg: 'bg-amber-400', label: 'أصفر' },
-                { key: 'blue', emoji: '🔵', bg: 'bg-blue-400', label: 'أزرق' },
-                { key: 'red', emoji: '🔴', bg: 'bg-red-400', label: 'أحمر' },
-                { key: 'green', emoji: '🟢', bg: 'bg-emerald-400', label: 'أخضر' }
-              ].map((colorOpt) => (
+              {ANNOTATION_COLORS.map((colorOpt) => (
                 <button
                   key={colorOpt.key}
                   type="button"
                   onClick={() => setSelectionState(prev => ({ ...prev, color: colorOpt.key }))}
-                  className={`w-6 h-6 rounded-full ${colorOpt.bg} hover:scale-110 transition-transform flex items-center justify-center text-[11px] relative cursor-pointer ${
+                  className={`w-6 h-6 rounded-full ${colorOpt.bg} hover:scale-110 transition-transform flex items-center justify-center text-[11px] relative cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-white ${
                     selectionState.color === colorOpt.key ? 'ring-2 ring-white ring-offset-2 ring-offset-[#2C2C2A] scale-110' : ''
                   }`}
+                  aria-label={`تظليل بلون ${colorOpt.label}`}
                   title={colorOpt.label}
                 >
                   {colorOpt.emoji}
@@ -1016,6 +1213,7 @@ export const PDFReader = () => {
             <button
               onClick={() => saveAnnotation(selectionState.color || 'yellow', selectionState.commentText)}
               className="px-2.5 py-1.5 bg-primary hover:bg-primary/95 text-white font-bold rounded text-xs transition-colors flex items-center justify-center cursor-pointer"
+              aria-label="تأكيد وحفظ التظليل"
               title="تأكيد وحفظ"
             >
               ✓
@@ -1062,7 +1260,17 @@ export const PDFReader = () => {
                     : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
                 }`}
               >
-                التعليقات ({annotations.length})
+                التعليقات ({highlights.length})
+              </button>
+              <button
+                onClick={() => setActiveTab('bookmarks')}
+                className={`flex-1 py-3 text-center text-xs font-bold transition-all border-b-2 ${
+                  activeTab === 'bookmarks'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
+                }`}
+              >
+                الإشارات ({bookmarks.length})
               </button>
               <button
                 onClick={() => setActiveTab('notes')}
@@ -1072,7 +1280,7 @@ export const PDFReader = () => {
                     : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
                 }`}
               >
-                ملاحظات حرة
+                ملاحظات
               </button>
             </div>
             
@@ -1081,14 +1289,14 @@ export const PDFReader = () => {
               {activeTab === 'annotations' ? (
                 /* Tab 1: Annotations */
                 <div className="space-y-3">
-                  {annotations.length === 0 ? (
+                  {highlights.length === 0 ? (
                     <p className="text-xs text-textSecondary dark:text-white/40 text-center py-8 leading-relaxed">
                       لا توجد مقاطع محددة بعد. حدد أي نص في الكتاب لتظليله أو إضافة تعليق عليه.
                     </p>
                   ) : (
                     <div className="space-y-4">
                       {Object.entries(
-                        annotations.reduce((acc, ann) => {
+                        highlights.reduce((acc, ann) => {
                           const page = ann.page_number
                           if (!acc[page]) acc[page] = []
                           acc[page].push(ann)
@@ -1106,41 +1314,24 @@ export const PDFReader = () => {
                               <div 
                                 key={ann.id} 
                                 onClick={() => scrollToPage(ann.page_number)}
-                                className={`p-3 rounded-custom border-l-4 text-xs relative group transition-all cursor-pointer hover:shadow-md ${
-                                  ann.color === 'blue' 
-                                    ? 'bg-blue-50/70 border-blue-400 hover:bg-blue-50 dark:bg-blue-950/20 dark:border-blue-500' 
-                                    : ann.color === 'red' 
-                                    ? 'bg-red-50/70 border-red-400 hover:bg-red-50 dark:bg-red-950/20 dark:border-red-500' 
-                                    : ann.color === 'green'
-                                    ? 'bg-emerald-50/70 border-emerald-400 hover:bg-emerald-50 dark:bg-emerald-950/20 dark:border-emerald-500'
-                                    : 'bg-amber-50/70 border-amber-400 hover:bg-amber-50 dark:bg-amber-950/20 dark:border-amber-500'
-                                }`}
+                                className={`p-3 rounded-custom border-l-4 text-xs relative group transition-all cursor-pointer hover:shadow-md ${cardClasses(ann.color)}`}
                               >
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation() // prevent scroll event
                                     deleteAnnotation(ann)
                                   }}
-                                  className="absolute top-2 left-2 p-1 text-textSecondary hover:text-danger rounded hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                  className="absolute top-2 left-2 p-1 text-textSecondary hover:text-danger rounded hover:bg-black/5 transition-colors"
+                                  aria-label={`حذف التعليق في صفحة ${ann.page_number}`}
                                   title="حذف"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
 
                                 {/* Badge & page label inside card */}
-                                <div className="flex items-center gap-1.5 mb-1 text-[10px] text-textSecondary dark:text-white/60">
-                                  <span className={`w-2 h-2 rounded-full ${
-                                    ann.color === 'blue'
-                                      ? 'bg-blue-500'
-                                      : ann.color === 'red'
-                                      ? 'bg-red-500'
-                                      : ann.color === 'green'
-                                      ? 'bg-emerald-500'
-                                      : 'bg-amber-400'
-                                  }`} />
-                                  <span>
-                                    {ann.color === 'blue' ? 'أزرق' : ann.color === 'red' ? 'أحمر' : ann.color === 'green' ? 'أخضر' : 'أصفر'}
-                                  </span>
+                                <div className="flex items-center gap-1.5 mb-1 text-[10px] text-textSecondary">
+                                  <span className={`w-2 h-2 rounded-full ${dotClasses(ann.color)}`} />
+                                  <span>{colorLabel(ann.color)}</span>
                                   <span>•</span>
                                   <span>ص {ann.page_number}</span>
                                 </div>
@@ -1163,8 +1354,74 @@ export const PDFReader = () => {
                     </div>
                   )}
                 </div>
+              ) : activeTab === 'bookmarks' ? (
+                /* Tab 2 : marque-pages manuels */
+                <div className="space-y-3">
+                  <button
+                    onClick={() => (currentBookmark ? removeBookmark(currentBookmark) : addBookmark())}
+                    className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-custom text-xs font-bold transition-colors ${
+                      currentBookmark
+                        ? 'bg-danger/10 text-danger hover:bg-danger hover:text-white'
+                        : 'bg-primary-light text-primary hover:bg-primary hover:text-white'
+                    }`}
+                  >
+                    {currentBookmark ? <Trash2 className="w-4 h-4" /> : <BookmarkPlus className="w-4 h-4" />}
+                    <span>
+                      {currentBookmark
+                        ? `حذف إشارة الصفحة ${currentPage}`
+                        : `إضافة إشارة للصفحة ${currentPage}`}
+                    </span>
+                  </button>
+
+                  {bookmarks.length === 0 ? (
+                    <p className="text-xs text-textSecondary dark:text-white/40 text-center py-8 leading-relaxed">
+                      لا توجد إشارات مرجعية بعد. أضف إشارة لأي صفحة للعودة إليها بسرعة.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {bookmarks.map(bm => (
+                        <div
+                          key={bm.id}
+                          className="p-3 rounded-custom border-r-4 border-primary bg-primary/5 dark:bg-primary/10 text-xs relative group transition-all"
+                        >
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <button
+                              onClick={() => scrollToPage(bm.page_number)}
+                              className="flex items-center gap-1.5 font-bold text-primary hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
+                            >
+                              <Bookmark className="w-3.5 h-3.5 fill-current" />
+                              <span>صفحة {bm.page_number}</span>
+                            </button>
+                            <button
+                              onClick={() => removeBookmark(bm)}
+                              aria-label={`حذف إشارة الصفحة ${bm.page_number}`}
+                              title="حذف"
+                              className="p-1 text-textSecondary hover:text-danger rounded hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                          {/* Libellé modifiable : un marque-page nommé « بداية الفصل
+                              الثالث » est bien plus utile qu'un simple numéro. */}
+                          <input
+                            type="text"
+                            defaultValue={bm.label || ''}
+                            placeholder="أضف عنواناً لهذه الإشارة..."
+                            onBlur={(e) => {
+                              if ((e.target.value || '') !== (bm.label || '')) {
+                                renameBookmark(bm, e.target.value)
+                              }
+                            }}
+                            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
+                            className="w-full bg-transparent border-b border-dashed border-cardBorder dark:border-white/20 text-textPrimary dark:text-white text-[11px] py-1 focus:outline-none focus:border-primary font-arabic"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               ) : (
-                /* Tab 2: Free Notes */
+                /* Tab 3: Free Notes */
                 <div className="flex flex-col space-y-2 h-full">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] text-textSecondary dark:text-white/60 font-bold">اكتب ملاحظاتك بحرية</span>

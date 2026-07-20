@@ -1,5 +1,11 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  // Par défaut Tailwind applique la stratégie `media` : les variantes `dark:`
+  // du panneau de notes s'activaient selon les préférences système, alors que
+  // tout le reste de l'application reste clair — panneau sombre sur fond clair
+  // (§2.14). En stratégie `class`, elles n'agissent que sous un ancêtre `.dark`,
+  // donc jamais aujourd'hui. Un vrai thème sombre pourra les réactiver d'un coup.
+  darkMode: 'class',
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",

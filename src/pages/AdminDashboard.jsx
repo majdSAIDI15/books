@@ -1,25 +1,46 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase, supabaseAdmin } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { Navbar } from '../components/Navbar'
 import { ProgressBar } from '../components/ProgressBar'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import {
   Users, BookOpen, UserCheck, Plus, FileText, Check, AlertCircle, RefreshCw, Trash2,
   ChevronDown, ChevronUp, CheckCircle2, XCircle, Flame, TrendingUp,
-  Shield, UserPlus, ShieldAlert, KeyRound
+  Shield, UserPlus, ShieldAlert, KeyRound, Image as ImageIcon
 } from 'lucide-react'
-import { pdfjs } from 'react-pdf'
+import { pdfjs } from '../lib/pdfWorker'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts'
 import {
   getLocalDateStr, getInitials, getLastReadInfo, buildChartData, getLast7Total, getStreak
 } from '../lib/stats'
-
-// Set PDF.js worker from CDN to avoid packaging issues
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version || '3.11.174'}/build/pdf.worker.min.mjs`
+import { fetchAllRows } from '../lib/fetchAll'
+import { renderCoverBlobFromFile, renderCoverBlobFromUrl, normalizeImageToCoverBlob } from '../lib/pdfCover'
+import { authErrorMessage } from '../lib/authErrors'
 
 const PASTEL_COVERS = ['#EEEDFE', '#E2F1E8', '#FCEEE3', '#E3F2FD', '#F3E5F5', '#FFF9C4', '#FFE0B2', '#D1C4E9']
+
+// Plafond de taille d'un PDF importé (§3.8).
+const MAX_PDF_MB = 100
+const MAX_PDF_BYTES = MAX_PDF_MB * 1024 * 1024
+
+// Plafond d'une image de couverture fournie par l'admin. Généreux : l'image est
+// de toute façon réduite et réencodée avant l'envoi.
+const MAX_IMAGE_MB = 10
+const MAX_IMAGE_BYTES = MAX_IMAGE_MB * 1024 * 1024
+
+// Longueur minimale, appliquée uniformément à la création et à la modification
+// d'un mot de passe (§4.8).
+const MIN_PASSWORD_LENGTH = 6
+
+const UPLOAD_STEP_LABELS = {
+  reading: 'جاري قراءة الملف وحساب الصفحات...',
+  uploading: 'جاري رفع الملف...',
+  cover: 'جاري إنشاء صورة الغلاف...',
+  saving: 'جاري حفظ بيانات الكتاب...'
+}
 
 /**
  * Les notifications ne sont réellement envoyables que si les DEUX clés OneSignal
@@ -102,8 +123,8 @@ const MemberChartPanel = ({ member }) => {
           )}
           {member.current_book_title && member.total_pages > 0 && (
             <div className="mt-1.5 max-w-[200px] mr-auto">
-              <ProgressBar progress={Math.min(100, (member.last_page / member.total_pages) * 100)} showLabel={false} size="sm" />
-              <span className="text-[10px] text-textSecondary">{Math.min(100, Math.round((member.last_page / member.total_pages) * 100))}%</span>
+              <ProgressBar progress={Math.min(100, (member.max_page / member.total_pages) * 100)} showLabel={false} size="sm" />
+              <span className="text-[10px] text-textSecondary">{Math.min(100, Math.round((member.max_page / member.total_pages) * 100))}%</span>
             </div>
           )}
         </div>
@@ -224,7 +245,17 @@ export const AdminDashboard = () => {
   const [category, setCategory] = useState('')
   const [pdfFile, setPdfFile] = useState(null)
   const [uploading, setUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState(0)
+  const [uploadStep, setUploadStep] = useState('reading')
+  const [bookError, setBookError] = useState('')
+  const [backfilling, setBackfilling] = useState(false)
+  const [backfillProgress, setBackfillProgress] = useState(0)
+  const [coverFile, setCoverFile] = useState(null)
+  const [coverPreview, setCoverPreview] = useState(null)
+  const [coverBusyBookId, setCoverBusyBookId] = useState(null)
+  const coverInputRef = useRef(null)
+  // `null` = aucun dialogue ouvert (voir components/ConfirmDialog.jsx).
+  const [confirmRequest, setConfirmRequest] = useState(null)
+  const pdfInputRef = useRef(null)
   const [formError, setFormError] = useState('')
   const [formSuccess, setFormSuccess] = useState('')
 
@@ -299,7 +330,15 @@ export const AdminDashboard = () => {
       setAccountError('الرجاء تعبئة جميع الحقول')
       return
     }
-    
+
+    // Cette validation manquait à la création alors qu'elle existait à la
+    // modification : un admin pouvait créer un compte avec un mot de passe d'un
+    // seul caractère, et l'erreur ne revenait qu'en anglais depuis Supabase (§4.8).
+    if (newAccPassword.trim().length < MIN_PASSWORD_LENGTH) {
+      setAccountError(`يجب أن تتكون كلمة المرور من ${MIN_PASSWORD_LENGTH} أحرف على الأقل`)
+      return
+    }
+
     if (!supabaseAdmin) {
       setAccountError('مفتاح الخدمة (Service Role Key) غير مهيأ. لا يمكن إنشاء الحساب.')
       return
@@ -343,40 +382,43 @@ export const AdminDashboard = () => {
     }
   }
 
+  // Les états accountError / accountSuccess existaient déjà et sont rendus
+  // proprement en arabe dans l'UI — mais ce chemin les réinitialisait puis
+  // passait par des `alert()` natifs, les rendant inertes (§4.5).
   const handleUpdatePassword = async (userId) => {
     setAccountError('')
     setAccountSuccess('')
-    
+
     if (!newPassword.trim()) {
-      alert('الرجاء إدخال كلمة المرور الجديدة')
+      setAccountError('الرجاء إدخال كلمة المرور الجديدة')
       return
     }
-    
-    if (newPassword.trim().length < 6) {
-      alert('يجب أن تتكون كلمة المرور من 6 أحرف على الأقل')
+
+    if (newPassword.trim().length < MIN_PASSWORD_LENGTH) {
+      setAccountError(`يجب أن تتكون كلمة المرور من ${MIN_PASSWORD_LENGTH} أحرف على الأقل`)
       return
     }
-    
+
     if (!supabaseAdmin) {
-      alert('مفتاح الخدمة (Service Role Key) غير مهيأ. لا يمكن تغيير كلمة المرور.')
+      setAccountError('مفتاح الخدمة (Service Role Key) غير مهيأ. لا يمكن تغيير كلمة المرور.')
       return
     }
-    
+
     setUpdatingPassword(true)
     try {
       const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, {
         password: newPassword.trim()
       })
-      
+
       if (error) throw error
-      
-      alert('تم تغيير كلمة المرور بنجاح!')
+
+      setAccountSuccess('تم تغيير كلمة المرور بنجاح!')
       setEditingPasswordUserId(null)
       setNewPassword('')
       fetchData()
     } catch (err) {
       console.error(err)
-      alert(err.message || 'حدث خطأ أثناء تحديث كلمة المرور')
+      setAccountError(authErrorMessage(err, 'حدث خطأ أثناء تحديث كلمة المرور'))
     } finally {
       setUpdatingPassword(false)
     }
@@ -391,8 +433,15 @@ export const AdminDashboard = () => {
     }
 
     const newRole = currentRole === 'admin' ? 'member' : 'admin'
-    if (!window.confirm(`هل أنت متأكد من رغبتك في تغيير دور هذا المستخدم إلى ${newRole === 'admin' ? 'مدير' : 'عضو'}؟`)) return
+    setConfirmRequest({
+      title: 'تغيير دور المستخدم',
+      message: `هل أنت متأكد من رغبتك في تغيير دور هذا المستخدم إلى ${newRole === 'admin' ? 'مدير' : 'عضو'}؟`,
+      confirmLabel: 'تغيير الدور',
+      onConfirm: () => applyRoleChange(userId, newRole)
+    })
+  }
 
+  const applyRoleChange = async (userId, newRole) => {
     setAccountError('')
     try {
       // Passe par une fonction SECURITY DEFINER qui revérifie côté serveur que
@@ -408,36 +457,51 @@ export const AdminDashboard = () => {
       fetchData()
     } catch (err) {
       console.error(err)
-      setAccountError(err.message || 'حدث خطأ أثناء تغيير دور المستخدم')
+      setAccountError(authErrorMessage(err, 'حدث خطأ أثناء تغيير دور المستخدم'))
     }
   }
 
-  const handleDeleteAccount = async (userId) => {
-    if (!window.confirm('هل أنت متأكد من رغبتك في حذف هذا الحساب بشكل نهائي؟ لا يمكن التراجع عن هذا الإجراء.')) return
-    
+  const handleDeleteAccount = (userId) => {
+    setAccountError('')
+    setAccountSuccess('')
+
     if (!supabaseAdmin) {
-      alert('مفتاح الخدمة (Service Role Key) غير مهيأ. لا يمكن حذف الحساب.')
+      setAccountError('مفتاح الخدمة (Service Role Key) غير مهيأ. لا يمكن حذف الحساب.')
       return
     }
-    
+
+    setConfirmRequest({
+      title: 'حذف الحساب نهائياً',
+      message: 'هل أنت متأكد من رغبتك في حذف هذا الحساب بشكل نهائي؟ لا يمكن التراجع عن هذا الإجراء.',
+      confirmLabel: 'حذف نهائياً',
+      danger: true,
+      onConfirm: () => applyAccountDeletion(userId)
+    })
+  }
+
+  const applyAccountDeletion = async (userId) => {
     try {
       // 1. Delete from Auth Users
       const { error: authErr } = await supabaseAdmin.auth.admin.deleteUser(userId)
       if (authErr) throw authErr
-      
+
       // 2. Delete from Profiles (in case cascade is not set)
       await supabase.from('profiles').delete().eq('id', userId)
-      
+
+      setAccountSuccess('تم حذف الحساب بنجاح.')
       fetchData()
     } catch (err) {
       console.error(err)
-      alert(err.message || 'حدث خطأ أثناء حذف الحساب')
+      setAccountError(authErrorMessage(err, 'حدث خطأ أثناء حذف الحساب'))
     }
   }
 
-  const fetchData = async () => {
+  // `silent` : rafraîchissement en arrière-plan, sans remplacer toute la page
+  // par des squelettes. `handleRefresh` déclenchait `setLoading(true)`, ce qui
+  // faisait clignoter l'intégralité du tableau de bord (§6.6).
+  const fetchData = async ({ silent = false } = {}) => {
     try {
-      setLoading(true)
+      if (!silent) setLoading(true)
       const todayStr = getLocalDateStr()
 
       // Fetch books
@@ -447,25 +511,20 @@ export const AdminDashboard = () => {
         .order('created_at', { ascending: false })
       if (booksErr) throw booksErr
 
-      // Fetch all profiles (both admins and members)
-      const { data: dbProfiles, error: profilesErr } = await supabase
-        .from('profiles')
-        .select('*')
-        .order('created_at', { ascending: false })
-      if (profilesErr) throw profilesErr
+      // Ces trois jeux de données peuvent dépasser la limite de 1000 lignes de
+      // PostgREST : ils sont donc paginés explicitement (§2.12).
+      const dbProfiles = await fetchAllRows(() =>
+        supabase.from('profiles').select('*').order('created_at', { ascending: false })
+      )
 
-      // Fetch reading sessions
-      const { data: dbSessions, error: sessionsErr } = await supabase
-        .from('reading_sessions')
-        .select('*, books(title, total_pages)')
-      if (sessionsErr) throw sessionsErr
+      const dbSessions = await fetchAllRows(() =>
+        supabase.from('reading_sessions').select('*, books(title, total_pages)')
+      )
 
       // Fetch ALL daily_logs (no date filter) — sorted by date asc for streak/chart logic
-      const { data: dbAllLogs, error: logsErr } = await supabase
-        .from('daily_logs')
-        .select('*')
-        .order('date', { ascending: true })
-      if (logsErr) throw logsErr
+      const dbAllLogs = await fetchAllRows(() =>
+        supabase.from('daily_logs').select('*').order('date', { ascending: true })
+      )
 
       // Compute stats
       const booksCount = dbBooks?.length || 0
@@ -492,6 +551,8 @@ export const AdminDashboard = () => {
           email: profile.email,
           current_book_title: activeSession?.books?.title || null,
           last_page: activeSession?.last_page || 0,
+          // Progression = page la plus avancée, pas la position courante (§2.10).
+          max_page: Math.max(activeSession?.max_page || 0, activeSession?.last_page || 0),
           total_pages: activeSession?.books?.total_pages || 0,
           read_today: readToday,
           logs: userLogs
@@ -571,34 +632,177 @@ export const AdminDashboard = () => {
 
   const handleRefresh = () => {
     setRefreshing(true)
-    fetchData()
+    fetchData({ silent: true })
   }
 
   const handleFileChange = (e) => {
     const file = e.target.files[0]
-    if (file && file.type === 'application/pdf') {
-      setPdfFile(file)
-      setFormError('')
-    } else {
+
+    if (!file) {
+      setPdfFile(null)
+      return
+    }
+
+    // `file.type` vient du navigateur : absent sur certains systèmes et
+    // trivialement contournable. On vérifie donc aussi l'extension (§3.8).
+    const looksLikePdf =
+      file.type === 'application/pdf' || /\.pdf$/i.test(file.name)
+
+    if (!looksLikePdf) {
       setPdfFile(null)
       setFormError('الرجاء اختيار ملف PDF صالح')
+      return
+    }
+
+    // Sans plafond, un PDF de 300 Mo lu intégralement en mémoire fait planter
+    // l'onglet — et le message d'erreur serait incompréhensible.
+    if (file.size > MAX_PDF_BYTES) {
+      setPdfFile(null)
+      setFormError(
+        `حجم الملف كبير جداً (${(file.size / 1024 / 1024).toFixed(1)} ميغابايت). الحد الأقصى ${MAX_PDF_MB} ميغابايت.`
+      )
+      return
+    }
+
+    setPdfFile(file)
+    setFormError('')
+  }
+
+  /** Envoie la vignette dans le bucket et renvoie son URL publique. */
+  const uploadCover = async (blob, baseName) => {
+    const path = `covers/${baseName}.jpg`
+    const { error } = await supabase.storage
+      .from('books')
+      .upload(path, blob, { cacheControl: '3600', upsert: true, contentType: 'image/jpeg' })
+    if (error) throw error
+    return supabase.storage.from('books').getPublicUrl(path).data.publicUrl
+  }
+
+  /** Vérifie un fichier image choisi par l'admin. Renvoie un message d'erreur ou null. */
+  const validateImage = (file) => {
+    const looksLikeImage = file.type.startsWith('image/') || /\.(jpe?g|png|webp)$/i.test(file.name)
+    if (!looksLikeImage) return 'الرجاء اختيار ملف صورة صالح (JPG أو PNG أو WEBP)'
+    if (file.size > MAX_IMAGE_BYTES) {
+      return `حجم الصورة كبير جداً (${(file.size / 1024 / 1024).toFixed(1)} ميغابايت). الحد الأقصى ${MAX_IMAGE_MB} ميغابايت.`
+    }
+    return null
+  }
+
+  /**
+   * Remplace la couverture d'un livre existant par une image fournie.
+   *
+   * Le nom de fichier inclut un horodatage : réutiliser le même chemin
+   * laisserait les navigateurs (et le CDN) servir l'ancienne image pendant
+   * toute la durée du `cacheControl`. L'ancienne est supprimée ensuite.
+   */
+  const handleReplaceCover = async (book, file) => {
+    setBookError('')
+
+    const invalid = validateImage(file)
+    if (invalid) { setBookError(invalid); return }
+
+    setCoverBusyBookId(book.id)
+    try {
+      const blob = await normalizeImageToCoverBlob(file)
+      const newUrl = await uploadCover(blob, `custom-${book.id}-${Date.now()}`)
+
+      const { error } = await supabase
+        .from('books')
+        .update({ cover_url: newUrl })
+        .eq('id', book.id)
+      if (error) throw error
+
+      // Nettoyage après coup : si ça échoue, on garde juste un fichier orphelin,
+      // ce qui est préférable à une couverture cassée.
+      const previous = book.cover_url
+      if (previous && previous.includes('/books/covers/')) {
+        const oldPath = decodeURIComponent(previous.split('/books/')[1])
+        await supabase.storage.from('books').remove([oldPath]).catch(() => {})
+      }
+
+      fetchData({ silent: true })
+    } catch (err) {
+      console.error('Échec du remplacement de la couverture:', err)
+      setBookError('تعذر تحديث صورة الغلاف. حاول مرة أخرى.')
+    } finally {
+      setCoverBusyBookId(null)
     }
   }
 
-  const getPdfPageCount = (file) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = async (e) => {
-        try {
-          const typedarray = new Uint8Array(e.target.result)
-          const loadingTask = pdfjs.getDocument({ data: typedarray })
-          const pdf = await loadingTask.promise
-          resolve(pdf.numPages)
-        } catch (err) { reject(err) }
+  /**
+   * Génère la couverture des livres importés avant cette fonctionnalité.
+   * Traité en série : chaque livre suppose de télécharger le début de son PDF,
+   * et paralléliser saturerait la bande passante pour un gain nul.
+   */
+  const handleBackfillCovers = async () => {
+    const pending = books.filter(b => !b.cover_url && b.pdf_url)
+    if (pending.length === 0) return
+
+    setBackfilling(true)
+    setBackfillProgress(0)
+    let failures = 0
+
+    for (const book of pending) {
+      try {
+        const blob = await renderCoverBlobFromUrl(book.pdf_url)
+        const coverUrl = await uploadCover(blob, `backfill-${book.id}`)
+        const { error } = await supabase
+          .from('books')
+          .update({ cover_url: coverUrl })
+          .eq('id', book.id)
+        if (error) throw error
+      } catch (err) {
+        failures += 1
+        console.error(`Échec de la couverture pour « ${book.title} » :`, err)
       }
-      reader.onerror = reject
-      reader.readAsArrayBuffer(file)
-    })
+      setBackfillProgress(prev => prev + 1)
+    }
+
+    setBackfilling(false)
+    setBookError(
+      failures > 0
+        ? `تم توليد الأغلفة مع فشل ${failures} من ${pending.length}. راجع سجل المتصفح للتفاصيل.`
+        : ''
+    )
+    fetchData({ silent: true })
+  }
+
+  // L'aperçu retient le fichier en mémoire jusqu'à révocation : sans ce
+  // nettoyage, quitter la page avec une image sélectionnée la laisse fuir.
+  useEffect(() => {
+    return () => { if (coverPreview) URL.revokeObjectURL(coverPreview) }
+  }, [coverPreview])
+
+  const handleCoverFileChange = (e) => {
+    const file = e.target.files[0]
+
+    // Aperçu révoqué systématiquement : chaque createObjectURL retient le
+    // fichier en mémoire tant qu'on ne le libère pas.
+    setCoverPreview(prev => { if (prev) URL.revokeObjectURL(prev); return null })
+
+    if (!file) { setCoverFile(null); return }
+
+    const invalid = validateImage(file)
+    if (invalid) {
+      setCoverFile(null)
+      setFormError(invalid)
+      if (coverInputRef.current) coverInputRef.current.value = ''
+      return
+    }
+
+    setCoverFile(file)
+    setCoverPreview(URL.createObjectURL(file))
+    setFormError('')
+  }
+
+  const getPdfPageCount = async (file) => {
+    // `file.arrayBuffer()` remplace FileReader : même coût mémoire, mais une
+    // promesse au lieu d'un jeu de callbacks (§3.8).
+    const buffer = await file.arrayBuffer()
+    const pdf = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise
+    const { numPages } = pdf
+    pdf.destroy()
+    return numPages
   }
 
   const handleAddBook = async (e) => {
@@ -612,10 +816,14 @@ export const AdminDashboard = () => {
     }
 
     setUploading(true)
-    setUploadProgress(10)
+    // Étape courante plutôt qu'un pourcentage inventé : les valeurs
+    // 10/20/40/80/100 étaient codées en dur et sans rapport avec l'avancement
+    // réel, la barre restant bloquée à 40 % pendant plusieurs minutes sur un
+    // gros fichier (§3.10). Le SDK Supabase Storage n'expose pas de callback de
+    // progression, donc on annonce l'étape au lieu de simuler une mesure.
+    setUploadStep('reading')
 
     try {
-      setUploadProgress(20)
       let totalPages = 0
       try {
         totalPages = await getPdfPageCount(pdfFile)
@@ -623,35 +831,53 @@ export const AdminDashboard = () => {
         throw new Error('فشل قراءة ملف PDF وتحديد عدد الصفحات.')
       }
 
-      setUploadProgress(40)
+      setUploadStep('uploading')
 
       const fileExt = pdfFile.name.split('.').pop()
-      const fileName = `${Math.random().toString(36).substring(2)}-${Date.now()}.${fileExt}`
-      const filePath = `pdfs/${fileName}`
+      const baseName = `${Math.random().toString(36).substring(2)}-${Date.now()}`
+      const filePath = `pdfs/${baseName}.${fileExt}`
 
       const { error: uploadErr } = await supabase.storage
         .from('books')
         .upload(filePath, pdfFile, { cacheControl: '3600', upsert: true })
       if (uploadErr) throw uploadErr
 
-      setUploadProgress(80)
+      setUploadStep('cover')
+
+      // Image fournie par l'admin si elle existe, sinon première page du PDF.
+      // Un échec ne bloque pas l'ajout du livre : la carte retombera sur le
+      // rendu local, puis sur son visuel coloré.
+      let coverUrl = null
+      try {
+        const blob = coverFile
+          ? await normalizeImageToCoverBlob(coverFile)
+          : await renderCoverBlobFromFile(pdfFile)
+        coverUrl = await uploadCover(blob, baseName)
+      } catch (coverErr) {
+        console.error('Échec de génération de la couverture:', coverErr)
+      }
+
+      setUploadStep('saving')
 
       const { data: { publicUrl } } = supabase.storage.from('books').getPublicUrl(filePath)
       const randomCoverColor = PASTEL_COVERS[Math.floor(Math.random() * PASTEL_COVERS.length)]
 
       const { error: insertErr } = await supabase.from('books').insert([{
         title: title.trim(), author: author.trim(), category,
-        pdf_url: publicUrl, total_pages: totalPages, cover_color: randomCoverColor
+        pdf_url: publicUrl, total_pages: totalPages,
+        cover_color: randomCoverColor, cover_url: coverUrl
       }])
       if (insertErr) throw insertErr
 
-      setUploadProgress(100)
       setFormSuccess('تمت إضافة الكتاب بنجاح!')
       setTitle('')
       setAuthor('')
       setCategory('')
       setPdfFile(null)
-      document.getElementById('pdf-upload-input').value = ''
+      if (pdfInputRef.current) pdfInputRef.current.value = ''
+      setCoverFile(null)
+      setCoverPreview(prev => { if (prev) URL.revokeObjectURL(prev); return null })
+      if (coverInputRef.current) coverInputRef.current.value = ''
       fetchData()
       setTimeout(() => { setShowAddForm(false); setFormSuccess('') }, 2000)
 
@@ -662,8 +888,20 @@ export const AdminDashboard = () => {
     }
   }
 
-  const handleDeleteBook = async (bookId, pdfUrl) => {
-    if (!window.confirm('هل أنت متأكد من رغبتك في حذف هذا الكتاب بشكل نهائي؟')) return
+  const booksMissingCover = books.filter(b => !b.cover_url && b.pdf_url).length
+
+  const handleDeleteBook = (bookId, pdfUrl, bookTitle) => {
+    setConfirmRequest({
+      title: 'حذف الكتاب',
+      message: `هل أنت متأكد من رغبتك في حذف «${bookTitle}» بشكل نهائي؟`,
+      confirmLabel: 'حذف نهائياً',
+      danger: true,
+      onConfirm: () => applyBookDeletion(bookId, pdfUrl)
+    })
+  }
+
+  const applyBookDeletion = async (bookId, pdfUrl) => {
+    setBookError('')
     try {
       setLoading(true)
       if (pdfUrl && pdfUrl.includes('/books/')) {
@@ -673,8 +911,9 @@ export const AdminDashboard = () => {
       const { error } = await supabase.from('books').delete().eq('id', bookId)
       if (error) throw error
       fetchData()
-    } catch {
-      alert('حدث خطأ أثناء حذف الكتاب')
+    } catch (err) {
+      console.error(err)
+      setBookError('حدث خطأ أثناء حذف الكتاب')
       setLoading(false)
     }
   }
@@ -694,7 +933,7 @@ export const AdminDashboard = () => {
           <div className="flex items-center space-x-3 space-x-reverse">
             <button onClick={handleRefresh} disabled={refreshing}
               className="p-2.5 bg-white border border-cardBorder text-textSecondary hover:text-primary rounded-custom shadow-sm transition-all"
-              title="تحديث البيانات">
+              aria-label="تحديث البيانات" title="تحديث البيانات">
               <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
             </button>
             <button onClick={() => setShowAddForm(!showAddForm)}
@@ -769,7 +1008,7 @@ export const AdminDashboard = () => {
                 <div>
                   <label className="text-xs font-bold text-textPrimary block mb-1">ملف الكتاب (PDF)</label>
                   <div className="relative">
-                    <input id="pdf-upload-input" type="file" required accept="application/pdf"
+                    <input id="pdf-upload-input" ref={pdfInputRef} type="file" required accept="application/pdf"
                       onChange={handleFileChange} className="hidden" />
                     <label htmlFor="pdf-upload-input"
                       className="w-full flex items-center justify-between px-4 py-2.5 bg-[#F8F7F4]/50 border border-dashed border-cardBorder hover:border-primary rounded-custom text-sm cursor-pointer transition-colors">
@@ -778,13 +1017,42 @@ export const AdminDashboard = () => {
                     </label>
                   </div>
                 </div>
+
+                {/* Couverture personnalisée, facultative : sans elle on prend
+                    automatiquement la première page du PDF. */}
+                <div>
+                  <label className="text-xs font-bold text-textPrimary block mb-1">
+                    صورة الغلاف <span className="font-medium text-textSecondary">(اختياري)</span>
+                  </label>
+                  <div className="relative flex items-center gap-3">
+                    <input id="cover-upload-input" ref={coverInputRef} type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={handleCoverFileChange} className="hidden" />
+                    <label htmlFor="cover-upload-input"
+                      className="flex-1 flex items-center justify-between px-4 py-2.5 bg-[#F8F7F4]/50 border border-dashed border-cardBorder hover:border-primary rounded-custom text-sm cursor-pointer transition-colors">
+                      <span className="text-textSecondary truncate">
+                        {coverFile ? coverFile.name : 'اتركه فارغاً لاستخدام أول صفحة من الكتاب'}
+                      </span>
+                      <ImageIcon className="w-5 h-5 text-primary shrink-0 mr-2" />
+                    </label>
+                    {coverPreview && (
+                      <img src={coverPreview} alt="معاينة الغلاف"
+                        className="w-10 h-14 object-cover rounded border border-cardBorder shrink-0" />
+                    )}
+                  </div>
+                </div>
               </div>
               <div className="md:col-span-2 border-t border-cardBorder pt-4 flex flex-col sm:flex-row justify-between items-center gap-4">
                 <div className="w-full sm:w-1/2">
                   {uploading && (
-                    <div className="space-y-1">
-                      <div className="text-xs font-semibold text-textSecondary">جاري رفع الملف وتجهيز الصفحات...</div>
-                      <ProgressBar progress={uploadProgress} showLabel={true} size="sm" />
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-semibold text-textSecondary">
+                        {UPLOAD_STEP_LABELS[uploadStep]}
+                      </div>
+                      {/* Indicateur indéterminé : honnête faute de mesure réelle. */}
+                      <div className="w-full h-1.5 bg-primary-light rounded-full overflow-hidden">
+                        <div className="h-full w-1/3 bg-primary rounded-full animate-indeterminate"></div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -932,10 +1200,31 @@ export const AdminDashboard = () => {
 
           {/* Books Management Section */}
           <div className="bg-white border border-cardBorder rounded-custom shadow-sm p-6 text-right">
-            <div className="mb-6">
-              <h3 className="text-lg font-bold text-textPrimary">إدارة الكتب المتوفرة</h3>
-              <p className="text-xs text-textSecondary mt-0.5 font-medium">قائمة الكتب المتاحة للقراءة وعدد القراء الحاليين لكل منها</p>
+            <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
+              <div>
+                <h3 className="text-lg font-bold text-textPrimary">إدارة الكتب المتوفرة</h3>
+                <p className="text-xs text-textSecondary mt-0.5 font-medium">قائمة الكتب المتاحة للقراءة وعدد القراء الحاليين لكل منها</p>
+              </div>
+              {booksMissingCover > 0 && (
+                <button
+                  onClick={handleBackfillCovers}
+                  disabled={backfilling}
+                  className="flex items-center space-x-2 space-x-reverse px-3 py-2 bg-primary-light text-primary rounded-custom text-xs font-bold hover:bg-primary hover:text-white transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw className={`w-4 h-4 ${backfilling ? 'animate-spin' : ''}`} />
+                  <span>
+                    {backfilling
+                      ? `جاري توليد الأغلفة... ${backfillProgress}/${booksMissingCover}`
+                      : `توليد أغلفة الكتب القديمة (${booksMissingCover})`}
+                  </span>
+                </button>
+              )}
             </div>
+            {bookError && (
+              <div role="alert" className="mb-4 bg-red-50 text-danger text-xs font-semibold px-4 py-3 rounded-custom border border-danger/20">
+                {bookError}
+              </div>
+            )}
             {loading ? (
               <div className="py-12 flex justify-center items-center">
                 <div className="w-8 h-8 border-4 border-primary-light border-t-primary rounded-full animate-spin"></div>
@@ -950,7 +1239,8 @@ export const AdminDashboard = () => {
                   <div key={book.id} className="border border-cardBorder rounded-custom p-4 flex flex-col justify-between hover:border-primary/20 transition-all">
                     <div>
                       <div className="flex justify-between items-start mb-3">
-                        <button onClick={() => handleDeleteBook(book.id, book.pdf_url)}
+                        <button onClick={() => handleDeleteBook(book.id, book.pdf_url, book.title)}
+                          aria-label={`حذف كتاب ${book.title}`}
                           className="p-1.5 text-textSecondary hover:text-danger hover:bg-red-50 rounded-custom transition-colors" title="حذف الكتاب">
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -958,8 +1248,49 @@ export const AdminDashboard = () => {
                           {book.category}
                         </span>
                       </div>
-                      <h4 className="font-bold text-textPrimary text-base line-clamp-1 mb-1">{book.title}</h4>
-                      <p className="text-xs text-textSecondary font-semibold mb-2">المؤلف: {book.author}</p>
+
+                      <div className="flex items-start gap-3 mb-2">
+                        {/* Aperçu de la couverture réellement servie aux membres */}
+                        <div className="w-14 h-20 shrink-0 rounded border border-cardBorder overflow-hidden bg-[#F8F7F4] flex items-center justify-center">
+                          {book.cover_url ? (
+                            <img src={book.cover_url} alt={book.title} loading="lazy"
+                              className="w-full h-full object-cover" />
+                          ) : (
+                            <BookOpen className="w-5 h-5 text-textSecondary/40" />
+                          )}
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <h4 className="font-bold text-textPrimary text-base line-clamp-1 mb-1">{book.title}</h4>
+                          <p className="text-xs text-textSecondary font-semibold mb-2">المؤلف: {book.author}</p>
+
+                          {/* Remplacement de la couverture par une image choisie */}
+                          <input
+                            id={`cover-replace-${book.id}`}
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files[0]
+                              if (file) handleReplaceCover(book, file)
+                              e.target.value = ''
+                            }}
+                          />
+                          <label
+                            htmlFor={`cover-replace-${book.id}`}
+                            className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-custom text-[11px] font-bold transition-colors ${
+                              coverBusyBookId === book.id
+                                ? 'bg-cardBorder/40 text-textSecondary cursor-wait'
+                                : 'bg-primary/10 text-primary hover:bg-primary hover:text-white cursor-pointer'
+                            }`}
+                          >
+                            <ImageIcon className="w-3.5 h-3.5" />
+                            <span>
+                              {coverBusyBookId === book.id ? 'جاري الرفع...' : 'تغيير صورة الغلاف'}
+                            </span>
+                          </label>
+                        </div>
+                      </div>
                     </div>
                     <div className="border-t border-cardBorder/60 pt-3 mt-3 flex justify-between items-center text-xs text-textSecondary font-semibold">
                       <span>عدد الصفحات: {book.total_pages}</span>
@@ -1165,6 +1496,7 @@ export const AdminDashboard = () => {
                                   onClick={() => { setEditingPasswordUserId(acc.id); setNewPassword('') }}
                                   disabled={!supabaseAdmin}
                                   className="p-1.5 text-textSecondary hover:text-primary hover:bg-primary-light rounded-custom transition-colors disabled:opacity-30"
+                                  aria-label="تغيير كلمة المرور"
                                   title="تغيير كلمة المرور"
                                 >
                                   <KeyRound className="w-4 h-4" />
@@ -1186,6 +1518,7 @@ export const AdminDashboard = () => {
                                 onClick={() => handleDeleteAccount(acc.id)}
                                 disabled={!supabaseAdmin || isSelf}
                                 className="p-1.5 text-textSecondary hover:text-danger hover:bg-red-50 rounded-custom transition-colors disabled:opacity-30"
+                                aria-label="حذف الحساب"
                                 title="حذف الحساب"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -1203,6 +1536,8 @@ export const AdminDashboard = () => {
           </div>
         </div>
       </main>
+
+      <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
     </div>
   )
 }

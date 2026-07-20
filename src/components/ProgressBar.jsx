@@ -1,4 +1,3 @@
-import React from 'react'
 
 export const ProgressBar = ({ progress, showLabel = true, size = 'md' }) => {
   // Ensure progress is between 0 and 100

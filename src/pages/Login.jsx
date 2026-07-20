@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
-import { BookOpen, Mail, Lock, User, AlertCircle, ArrowLeft } from 'lucide-react'
+import { BookOpen, Mail, Lock, User, AlertCircle, ArrowLeft, CheckCircle2 } from 'lucide-react'
+import { authErrorMessage } from '../lib/authErrors'
 
 export const Login = () => {
   const { user, profile, loading, setUser, setProfile, setLoading } = useAuth()
@@ -14,21 +15,23 @@ export const Login = () => {
   const [name, setName] = useState('')
   const [authLoading, setAuthLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+  const [infoMessage, setInfoMessage] = useState('')
 
-  // Redirect if already logged in
+  // Unique voie de redirection après authentification (§4.9). L'ancien code
+  // mêlait ce `navigate()` et un `window.location.href` dans `handleAuth` —
+  // rechargement complet de la page, perte de l'état SPA, et trois commits
+  // successifs pour tenter de stabiliser le comportement. Ici c'est cet effet
+  // seul qui décide, dès que `user` et `profile` sont connus.
   useEffect(() => {
     if (!loading && user && profile) {
-      if (profile.role === 'admin') {
-        navigate('/admin')
-      } else {
-        navigate('/member')
-      }
+      navigate(profile.role === 'admin' ? '/admin' : '/member', { replace: true })
     }
   }, [user, profile, loading, navigate])
 
   const handleAuth = async (e) => {
     e.preventDefault()
     setErrorMessage('')
+    setInfoMessage('')
     setAuthLoading(true)
 
     try {
@@ -37,7 +40,10 @@ export const Login = () => {
         if (!name.trim()) {
           throw new Error('يرجى إدخال الاسم')
         }
-        
+        if (password.length < 6) {
+          throw new Error('يجب أن تتكون كلمة المرور من 6 أحرف على الأقل.')
+        }
+
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
@@ -50,9 +56,20 @@ export const Login = () => {
 
         if (error) throw error
 
-        if (data?.user) {
-          // New user defaults to 'member', redirect to member dashboard
-          navigate('/member')
+        // Si la confirmation d'e-mail est activée dans Supabase, `signUp`
+        // renvoie un utilisateur SANS session. L'ancien code naviguait quand
+        // même vers /member, où l'absence de session renvoyait au login sans le
+        // moindre message (§2.5).
+        if (data?.user && !data.session) {
+          setInfoMessage('تم إنشاء الحساب. يرجى تأكيد بريدك الإلكتروني عبر الرابط المرسل إليك ثم تسجيل الدخول.')
+          setIsRegister(false)
+          return
+        }
+
+        if (data?.session?.user) {
+          // La redirection est prise en charge par l'effet ci-dessus, dès que
+          // AuthContext aura publié `user` et `profile`.
+          setUser(data.session.user)
         }
       } else {
         // Sign In flow
@@ -63,13 +80,7 @@ export const Login = () => {
         })
 
         if (error) {
-          let msg = error.message
-          if (msg === 'Invalid login credentials') {
-            msg = 'البريد الإلكتروني أو كلمة المرور غير صحيحة.'
-          } else if (msg.includes('rate limit')) {
-            msg = 'لقد قمت بمحاولات كثيرة جداً. يرجى المحاولة لاحقاً.'
-          }
-          setErrorMessage(msg)
+          setErrorMessage(authErrorMessage(error))
           setLoading(false)
           return
         }
@@ -77,40 +88,30 @@ export const Login = () => {
         if (data?.user) {
           setUser(data.user)
 
-          // Immediately fetch profile and redirect
+          // Le profil est chargé ici plutôt que d'attendre `onAuthStateChange`,
+          // pour que la redirection parte sans délai perceptible.
           const { data: profileData, error: profileError } = await supabase
             .from('profiles')
             .select('*')
             .eq('id', data.user.id)
-            .single()
+            .maybeSingle()
 
           if (profileError) {
-            setErrorMessage(profileError.message)
+            setErrorMessage(authErrorMessage(profileError))
             setLoading(false)
             return
           }
 
           setProfile(profileData)
-          window.location.href = profileData?.role === 'admin' ? '/admin' : '/member'
           setLoading(false)
+          // Profil pas encore créé : ProtectedRoute affiche l'écran
+          // « جاري تجهيز حسابك » au lieu de rejeter vers /unauthorized.
+          if (!profileData) navigate('/member', { replace: true })
         }
       }
     } catch (err) {
       console.error(err)
-      // Arabic translated error messages
-      let msg = err.message
-      if (msg === 'Invalid login credentials') {
-        msg = 'البريد الإلكتروني أو كلمة المرور غير صحيحة.'
-      } else if (msg === 'User already registered') {
-        msg = 'هذا البريد الإلكتروني مسجل بالفعل.'
-      } else if (msg === 'Password should be at least 6 characters') {
-        msg = 'يجب أن تتكون كلمة المرور من 6 أحرف على الأقل.'
-      } else if (msg === 'Email address already registered') {
-        msg = 'البريد الإلكتروني مسجل بالفعل.'
-      } else if (msg.includes('rate limit')) {
-        msg = 'لقد قمت بمحاولات كثيرة جداً. يرجى المحاولة لاحقاً.'
-      }
-      setErrorMessage(msg)
+      setErrorMessage(authErrorMessage(err))
       setLoading(false)
     } finally {
       setAuthLoading(false)
@@ -143,9 +144,16 @@ export const Login = () => {
           </h2>
 
           {errorMessage && (
-            <div className="mb-4 bg-red-50 text-danger text-xs font-semibold px-4 py-3 rounded-custom border border-danger/20 flex items-center space-x-2 space-x-reverse text-right">
+            <div role="alert" className="mb-4 bg-red-50 text-danger text-xs font-semibold px-4 py-3 rounded-custom border border-danger/20 flex items-center space-x-2 space-x-reverse text-right">
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>{errorMessage}</span>
+            </div>
+          )}
+
+          {infoMessage && (
+            <div role="status" className="mb-4 bg-green-50 text-success text-xs font-semibold px-4 py-3 rounded-custom border border-success/20 flex items-center space-x-2 space-x-reverse text-right">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span className="leading-relaxed">{infoMessage}</span>
             </div>
           )}
 
@@ -160,6 +168,8 @@ export const Login = () => {
                   </span>
                   <input
                     type="text"
+                    name="name"
+                    autoComplete="name"
                     required
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -178,6 +188,8 @@ export const Login = () => {
                 </span>
                 <input
                   type="email"
+                  name="email"
+                  autoComplete="email"
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -195,6 +207,11 @@ export const Login = () => {
                 </span>
                 <input
                   type="password"
+                  name="password"
+                  // Le gestionnaire de mots de passe doit savoir s'il s'agit
+                  // d'une saisie ou d'une création (§6.3).
+                  autoComplete={isRegister ? 'new-password' : 'current-password'}
+                  minLength={isRegister ? 6 : undefined}
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}

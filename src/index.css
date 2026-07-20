@@ -48,18 +48,14 @@ body {
   border: 0.5px solid rgba(224, 222, 214, 0.5);
 }
 
-/* Slide in from left for RTL notes sidebar */
-@keyframes slideInLeft {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(0);
-  }
+/* Indicateur de progression indéterminé (upload d'un livre) */
+@keyframes indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
 }
 
-.animate-slide-in {
-  animation: slideInLeft 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+.animate-indeterminate {
+  animation: indeterminate 1.2s ease-in-out infinite;
 }
 
 /* Slide in from right for RTL notes sidebar */

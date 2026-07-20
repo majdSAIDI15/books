@@ -1,17 +1,21 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { Navbar } from '../components/Navbar'
 import { BookCard } from '../components/BookCard'
 import { ProgressBar } from '../components/ProgressBar'
+import { BookCoverThumb } from '../components/BookCoverThumb'
+import { AccountSettings } from '../components/AccountSettings'
 import {
-  BookOpen, Clock, Settings, Bell, BellOff, CheckCircle2, ChevronDown, ChevronUp, AlertCircle, Flame, TrendingUp
+  BookOpen, Clock, Settings, Bell, BellOff, CheckCircle2, ChevronDown, ChevronUp,
+  AlertCircle, Flame, TrendingUp, UserCog
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell
 } from 'recharts'
 import { getLocalDateStr, buildChartData, getLast7Total, getStreak, sumPagesForDate } from '../lib/stats'
+import { loadOneSignal } from '../lib/oneSignal'
 
 // ─── Custom BarChart Tooltip ──────────────────────────────────────────────────
 
@@ -45,6 +49,7 @@ export const MemberDashboard = () => {
 
   // Notification states
   const [showSettings, setShowSettings] = useState(false)
+  const [showAccount, setShowAccount] = useState(false)
   const [notifTime, setNotifTime] = useState('21:00')
   const [notifEnabled, setNotifEnabled] = useState(false)
   const [settingsLoading, setSettingsLoading] = useState(false)
@@ -52,75 +57,97 @@ export const MemberDashboard = () => {
 
   // ── Fetch ────────────────────────────────────────────────────────────────────
 
-  const fetchData = async () => {
-    if (!user) return
-    try {
-      setLoading(true)
-      const todayStr = getLocalDateStr()
+  // Chargement défini dans l'effet plutôt qu'à l'extérieur : `loading` vaut
+  // déjà true à l'initialisation, aucun setState n'a donc lieu avant le premier
+  // await, et le garde `active` évite d'écrire dans un composant démonté.
+  useEffect(() => {
+    if (!user) return undefined
 
-      // All books
-      const { data: dbBooks, error: booksErr } = await supabase.from('books').select('*')
-      if (booksErr) throw booksErr
-      setBooks(dbBooks || [])
+    let active = true
 
-      // Reading sessions for current user
-      const { data: dbSessions, error: sessionsErr } = await supabase
-        .from('reading_sessions').select('*').eq('user_id', user.id)
-      if (sessionsErr) throw sessionsErr
-      setSessions(dbSessions || [])
+    const load = async () => {
+      try {
+        const todayStr = getLocalDateStr()
 
-      // ALL daily_logs for current user (no date filter)
-      const { data: dbLogs, error: logsErr } = await supabase
-        .from('daily_logs')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('date', { ascending: true })
-      if (logsErr) throw logsErr
-      setAllLogs(dbLogs || [])
+        // All books
+        const { data: dbBooks, error: booksErr } = await supabase.from('books').select('*')
+        if (booksErr) throw booksErr
+        if (!active) return
+        setBooks(dbBooks || [])
 
-      // Check if read today (tous livres confondus)
-      setHasReadToday(sumPagesForDate(dbLogs, todayStr) > 0)
+        // Reading sessions for current user
+        const { data: dbSessions, error: sessionsErr } = await supabase
+          .from('reading_sessions').select('*').eq('user_id', user.id)
+        if (sessionsErr) throw sessionsErr
+        if (!active) return
+        setSessions(dbSessions || [])
 
-    } catch (err) {
-      console.error('Error fetching member dashboard data:', err)
-    } finally {
-      setLoading(false)
+        // ALL daily_logs for current user (no date filter)
+        const { data: dbLogs, error: logsErr } = await supabase
+          .from('daily_logs')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('date', { ascending: true })
+        if (logsErr) throw logsErr
+        if (!active) return
+        setAllLogs(dbLogs || [])
+
+        // Check if read today (tous livres confondus)
+        setHasReadToday(sumPagesForDate(dbLogs, todayStr) > 0)
+
+      } catch (err) {
+        console.error('Error fetching member dashboard data:', err)
+      } finally {
+        if (active) setLoading(false)
+      }
     }
-  }
 
-  useEffect(() => { fetchData() }, [user])
+    load()
+    return () => { active = false }
+  }, [user])
 
   // ── OneSignal ─────────────────────────────────────────────────────────────────
 
   useEffect(() => {
+    let active = true
+
     const initOneSignal = async () => {
-      const appId = import.meta.env.VITE_ONESIGNAL_APP_ID
-      if (!appId || appId === 'your_onesignal_app_id_here') return
-      if (window.OneSignal) {
-        try {
-          await window.OneSignal.init({ appId, allowLocalhostAsSecureOrigin: true })
-          if (user) {
-            await window.OneSignal.login(user.id)
-            if (user.email) {
-              await window.OneSignal.User.addTag('email', user.email)
-            }
-          }
-          if (user?.user_metadata?.notification_time) setNotifTime(user.user_metadata.notification_time)
-          setNotifEnabled(window.OneSignal.Notifications.permission === 'granted')
-        } catch (e) { console.error('OneSignal init failed:', e) }
-      }
+      const OneSignal = await loadOneSignal()
+      if (!OneSignal || !active) return
+      try {
+        await OneSignal.init({
+          appId: import.meta.env.VITE_ONESIGNAL_APP_ID,
+          allowLocalhostAsSecureOrigin: true
+        })
+        if (user) {
+          await OneSignal.login(user.id)
+          if (user.email) await OneSignal.User.addTag('email', user.email)
+        }
+        if (!active) return
+        if (user?.user_metadata?.notification_time) setNotifTime(user.user_metadata.notification_time)
+        setNotifEnabled(OneSignal.Notifications.permission === 'granted')
+      } catch (e) { console.error('OneSignal init failed:', e) }
     }
+
     initOneSignal()
+    return () => { active = false }
   }, [user])
 
+  // Les retours passent par `settingsMessage`, déjà rendu en arabe dans l'UI,
+  // plutôt que par des `alert()` natifs bloquants (§4.5).
   const handleToggleNotifications = async () => {
-    if (!window.OneSignal) { alert('خدمة التنبيهات غير متوفرة حالياً'); return }
+    setSettingsMessage('')
+    const OneSignal = await loadOneSignal()
+    if (!OneSignal) {
+      setSettingsMessage('خدمة التنبيهات غير متوفرة حالياً.')
+      return
+    }
     try {
-      if (window.OneSignal.Notifications.permission !== 'granted') {
-        await window.OneSignal.Notifications.requestPermission()
-        setNotifEnabled(window.OneSignal.Notifications.permission === 'granted')
+      if (OneSignal.Notifications.permission !== 'granted') {
+        await OneSignal.Notifications.requestPermission()
+        setNotifEnabled(OneSignal.Notifications.permission === 'granted')
       } else {
-        alert('يمكنك تعطيل التنبيهات من إعدادات المتصفح الخاص بك.')
+        setSettingsMessage('يمكنك تعطيل التنبيهات من إعدادات المتصفح الخاص بك.')
       }
     } catch (e) { console.error(e) }
   }
@@ -135,7 +162,7 @@ export const MemberDashboard = () => {
       if (window.OneSignal?.User) await window.OneSignal.User.addTag('notification_time', notifTime)
       setSettingsMessage('تم حفظ إعدادات التنبيهات بنجاح!')
       setTimeout(() => setSettingsMessage(''), 3000)
-    } catch (err) {
+    } catch {
       setSettingsMessage('حدث خطأ أثناء حفظ الإعدادات.')
     } finally {
       setSettingsLoading(false)
@@ -150,7 +177,10 @@ export const MemberDashboard = () => {
     const session = sessions.find(s => s.book_id === bookId)
     const book = books.find(b => b.id === bookId)
     if (!session || !book || book.total_pages === 0) return 0
-    return (session.last_page / book.total_pages) * 100
+    // Sur `max_page` et non `last_page` : la progression mesure le plus loin
+    // atteint, elle ne doit pas reculer quand on relit un chapitre (§2.10).
+    const reached = Math.max(session.max_page || 0, session.last_page || 0)
+    return (reached / book.total_pages) * 100
   }
 
   const dynamicCategories = ['الكل', ...new Set(books.map(b => b.category).filter(Boolean))]
@@ -164,7 +194,6 @@ export const MemberDashboard = () => {
   const chartData = buildChartData(allLogs, chartRange)
   const last7Total = getLast7Total(allLogs)
   const streak = getStreak(allLogs)
-  const maxPages = Math.max(...chartData.map(d => d.pages), 1)
 
   const RANGE_LABELS = { '7': 'آخر 7 أيام', '30': 'آخر 30 يوم', 'all': 'كل التاريخ' }
 
@@ -255,6 +284,27 @@ export const MemberDashboard = () => {
               </div>
             )}
           </div>
+
+          {/* Gestion du compte : mot de passe et suppression */}
+          <div className="bg-white border border-cardBorder rounded-custom shadow-sm overflow-hidden mt-4">
+            <button
+              onClick={() => setShowAccount(!showAccount)}
+              aria-expanded={showAccount}
+              className="w-full px-5 py-4 flex items-center justify-between text-textPrimary hover:bg-[#F8F7F4]/30"
+            >
+              <div className="flex items-center space-x-2 space-x-reverse">
+                <UserCog className="w-5 h-5 text-primary" />
+                <span className="text-sm font-bold">إعدادات الحساب</span>
+              </div>
+              {showAccount ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+
+            {showAccount && (
+              <div className="px-5 pb-5 border-t border-cardBorder/60 pt-4">
+                <AccountSettings />
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Active Books Progress */}
@@ -268,11 +318,7 @@ export const MemberDashboard = () => {
                 return (
                   <div key={book.id} className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-4 border border-cardBorder/60 rounded-custom hover:border-primary/20 transition-colors gap-4">
                     <div className="flex items-center space-x-3 space-x-reverse max-w-md">
-                      <div className="w-10 h-12 rounded-sm shrink-0 shadow-sm border border-black/10 relative overflow-hidden flex items-center justify-center"
-                        style={{ backgroundColor: book.cover_color || '#EEEDFE' }}>
-                        <div className="absolute top-0 right-0 bottom-0 w-1 bg-black/10"></div>
-                        <BookOpen className="w-5 h-5 text-primary/70" />
-                      </div>
+                      <BookCoverThumb book={book} />
                       <div>
                         <h4 className="text-sm font-semibold text-textPrimary leading-tight line-clamp-1">{book.title}</h4>
                         <span className="text-xs text-textSecondary mt-1 block font-medium">الصفحة {session?.last_page} من {book.total_pages}</span>

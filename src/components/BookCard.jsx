@@ -1,36 +1,63 @@
-import React from 'react'
 import { Book, Play, ArrowLeft } from 'lucide-react'
 import { ProgressBar } from './ProgressBar'
+import { useBookCover } from '../lib/useBookCover'
 
 export const BookCard = ({ book, progress = 0, onStartRead }) => {
-  const { title, author, category, cover_color } = book
+  const { title, author, category, cover_color, pdf_url, cover_url } = book
 
   const isStarted = progress > 0
+  // Couverture stockée si elle existe, sinon rendu local du PDF. Vaut null tant
+  // qu'aucune des deux n'a abouti : on affiche alors le visuel coloré d'origine.
+  const { src: showCover, onError: onCoverError } = useBookCover(pdf_url, cover_url)
 
   return (
     <div className="bg-white border border-cardBorder rounded-custom shadow-sm overflow-hidden flex flex-col justify-between hover:shadow-md hover:border-primary/30 transition-all duration-300 group">
-      
-      {/* Premium Book Cover Mockup */}
-      <div 
+
+      {/* Première page du PDF si disponible, sinon maquette colorée */}
+      <div
         className="h-44 relative flex items-center justify-center p-6 select-none transition-transform duration-300"
         style={{ backgroundColor: cover_color || '#EEEDFE' }}
       >
-        {/* Subtle spine gradient for 3D book effect */}
-        <div className="absolute top-0 right-0 bottom-0 w-3 bg-black/10 shadow-[inset_-1px_0_2px_rgba(0,0,0,0.1)]"></div>
-        <div className="absolute top-0 right-3 bottom-0 w-1 bg-white/10"></div>
+        {showCover ? (
+          <>
+            <img
+              src={showCover}
+              alt={title}
+              loading="lazy"
+              onError={onCoverError}
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+            {/* Voile bas pour garder le titre lisible sur une page claire */}
+            <div className="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-black/75 via-black/25 to-transparent"></div>
+            <div className="absolute inset-x-0 bottom-0 p-3 text-right">
+              <span className="text-[10px] font-semibold px-2 py-0.5 bg-white/25 text-white rounded-full backdrop-blur-sm">
+                {category || 'عام'}
+              </span>
+              <h3 className="text-sm font-bold text-white leading-tight line-clamp-2 mt-1.5 drop-shadow">
+                {title}
+              </h3>
+            </div>
+          </>
+        ) : (
+          <>
+            {/* Subtle spine gradient for 3D book effect */}
+            <div className="absolute top-0 right-0 bottom-0 w-3 bg-black/10 shadow-[inset_-1px_0_2px_rgba(0,0,0,0.1)]"></div>
+            <div className="absolute top-0 right-3 bottom-0 w-1 bg-white/10"></div>
 
-        {/* Content on the cover */}
-        <div className="text-center flex flex-col items-center max-w-full">
-          <div className="bg-white/20 p-2.5 rounded-full mb-3 backdrop-blur-sm border border-white/30 text-textPrimary">
-            <Book className="w-8 h-8 text-primary" />
-          </div>
-          <span className="text-xs font-semibold px-2 py-0.5 bg-black/15 text-textPrimary rounded-full mb-2 uppercase tracking-wide backdrop-blur-sm">
-            {category || 'عام'}
-          </span>
-          <h3 className="text-base font-bold text-textPrimary leading-tight line-clamp-2 px-2 text-center drop-shadow-sm">
-            {title}
-          </h3>
-        </div>
+            {/* Content on the cover */}
+            <div className="text-center flex flex-col items-center max-w-full">
+              <div className="bg-white/20 p-2.5 rounded-full mb-3 backdrop-blur-sm border border-white/30 text-textPrimary">
+                <Book className="w-8 h-8 text-primary" />
+              </div>
+              <span className="text-xs font-semibold px-2 py-0.5 bg-black/15 text-textPrimary rounded-full mb-2 uppercase tracking-wide backdrop-blur-sm">
+                {category || 'عام'}
+              </span>
+              <h3 className="text-base font-bold text-textPrimary leading-tight line-clamp-2 px-2 text-center drop-shadow-sm">
+                {title}
+              </h3>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Book details & Progress */}

@@ -1,4 +1,3 @@
-import React from 'react'
 import { LogOut, Bell, BookOpen } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useNavigate } from 'react-router-dom'
@@ -44,6 +43,7 @@ export const Navbar = ({ title, showNotificationBell = false, onBellClick = null
             <button 
               onClick={onBellClick}
               className="relative p-2 text-textSecondary hover:text-primary hover:bg-primary-light rounded-custom transition-all duration-200"
+              aria-label="تنبيهات القراءة"
               title="تنبيهات القراءة"
             >
               <Bell className="w-5 h-5" />
@@ -73,6 +73,7 @@ export const Navbar = ({ title, showNotificationBell = false, onBellClick = null
           <button
             onClick={handleLogout}
             className="flex items-center space-x-2 space-x-reverse p-2 text-textSecondary hover:text-danger hover:bg-red-50 rounded-custom transition-all duration-200"
+            aria-label="تسجيل الخروج"
             title="تسجيل الخروج"
           >
             {/* Flip LogOut icon for RTL using scale-x-[-1] */}
