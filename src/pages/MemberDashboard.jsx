@@ -7,6 +7,7 @@ import { BookCard } from '../components/BookCard'
 import { ProgressBar } from '../components/ProgressBar'
 import { BookCoverThumb } from '../components/BookCoverThumb'
 import { AccountSettings } from '../components/AccountSettings'
+import { InstallButton } from '../components/InstallButton'
 import {
   BookOpen, Clock, Settings, Bell, BellOff, CheckCircle2, ChevronDown, ChevronUp,
   AlertCircle, Flame, TrendingUp, UserCog
@@ -305,6 +306,9 @@ export const MemberDashboard = () => {
               </div>
             )}
           </div>
+
+          {/* Installation de l'application (point d'entrée permanent) */}
+          <InstallButton />
         </div>
 
         {/* Active Books Progress */}

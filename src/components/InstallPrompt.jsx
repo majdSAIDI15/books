@@ -1,19 +1,16 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { Download, X, Share } from 'lucide-react'
+import { useInstallPrompt } from '../lib/useInstallPrompt'
 
 const DISMISSED_KEY = 'installPromptDismissed'
 
-/** L'app tourne-t-elle déjà depuis l'écran d'accueil ? */
-const isStandalone = () =>
-  window.matchMedia('(display-mode: standalone)').matches ||
-  // Safari iOS n'implémente pas display-mode et expose ce booléen non standard.
-  window.navigator.standalone === true
-
-const isIOS = () =>
-  /iphone|ipad|ipod/i.test(window.navigator.userAgent) && !window.MSStream
-
 /**
  * Invite à installer l'application sur l'écran d'accueil.
+ *
+ * Popup ponctuelle et masquable (mémorisée dans localStorage) : une fois fermée,
+ * elle ne réapparaît plus. Le point d'entrée PERMANENT vit ailleurs
+ * (voir components/InstallButton.jsx) ; les deux partagent le même état via
+ * `useInstallPrompt`.
  *
  * Deux chemins, car les plateformes diffèrent radicalement :
  *   - Android / Chrome / Edge : `beforeinstallprompt` permet de déclencher la
@@ -22,32 +19,11 @@ const isIOS = () =>
  *     par « Partager → Sur l'écran d'accueil », donc on explique le geste.
  */
 export const InstallPrompt = () => {
-  const [deferredPrompt, setDeferredPrompt] = useState(null)
+  const { ios, canInstall, promptInstall } = useInstallPrompt()
   const [showIOSHelp, setShowIOSHelp] = useState(false)
   const [dismissed, setDismissed] = useState(
     () => localStorage.getItem(DISMISSED_KEY) === '1'
   )
-
-  useEffect(() => {
-    const onBeforeInstall = (e) => {
-      // Sans ce preventDefault, Chrome affiche sa propre mini-bannière et notre
-      // bouton n'aurait plus rien à déclencher.
-      e.preventDefault()
-      setDeferredPrompt(e)
-    }
-    window.addEventListener('beforeinstallprompt', onBeforeInstall)
-
-    const onInstalled = () => {
-      setDeferredPrompt(null)
-      localStorage.setItem(DISMISSED_KEY, '1')
-    }
-    window.addEventListener('appinstalled', onInstalled)
-
-    return () => {
-      window.removeEventListener('beforeinstallprompt', onBeforeInstall)
-      window.removeEventListener('appinstalled', onInstalled)
-    }
-  }, [])
 
   const close = () => {
     setDismissed(true)
@@ -55,20 +31,7 @@ export const InstallPrompt = () => {
     localStorage.setItem(DISMISSED_KEY, '1')
   }
 
-  const handleInstall = async () => {
-    if (!deferredPrompt) return
-    deferredPrompt.prompt()
-    await deferredPrompt.userChoice
-    // Un prompt différé ne peut servir qu'une fois.
-    setDeferredPrompt(null)
-  }
-
-  if (dismissed || isStandalone()) return null
-
-  const ios = isIOS()
-  // Sur Android, rien à proposer tant que le navigateur n'a pas jugé l'app
-  // installable (HTTPS, manifeste, service worker actif).
-  if (!ios && !deferredPrompt) return null
+  if (dismissed || !canInstall) return null
 
   return (
     <div
@@ -132,7 +95,7 @@ export const InstallPrompt = () => {
             افتح الكتب بسرعة من شاشتك الرئيسية، بدون شريط عنوان.
           </p>
           <button
-            onClick={handleInstall}
+            onClick={promptInstall}
             className="w-full py-2 bg-primary text-white text-xs font-bold rounded-custom hover:bg-primary/90 transition-colors"
           >
             تثبيت الآن
