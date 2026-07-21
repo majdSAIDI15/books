@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import { Document, Page } from 'react-pdf'
 import {
   ArrowRight, BookOpen, AlertTriangle, RefreshCw, FileText, Trash2, X,
-  Bookmark, BookmarkPlus, ChevronUp, ChevronDown, Highlighter
+  Bookmark, BookmarkPlus, ChevronUp, ChevronDown, Highlighter, StickyNote
 } from 'lucide-react'
 import { getLocalDateStr } from '../lib/stats'
 import { applyAnnotation, clearAnnotations, occurrenceIndexOfSelection, solidColor } from '../lib/pdfHighlight'
@@ -36,7 +36,7 @@ const EMPTY_ZONES = []
  */
 const PdfPageSlot = memo(function PdfPageSlot({
   pageNum, isNear, pageWidth, bookmark, onRenderSuccess,
-  zones, markerMode, markerColor, onCreateZone, onDeleteZone
+  zones, markerMode, markerColor, onCreateZone, onDeleteZone, onOpenNote
 }) {
   const estimatedHeight = pageWidth * 1.414
 
@@ -89,6 +89,7 @@ const PdfPageSlot = memo(function PdfPageSlot({
             markerColor={markerColor}
             onCreate={(rect) => onCreateZone(pageNum, rect)}
             onDelete={onDeleteZone}
+            onOpenNote={onOpenNote}
           />
         </div>
       ) : (
@@ -158,6 +159,10 @@ export const PDFReader = () => {
   const [zones, setZones] = useState([])
   const [markerMode, setMarkerMode] = useState(false)
   const [markerColor, setMarkerColor] = useState('yellow')
+  // Popup d'édition de la ملاحظة ancrée à une zone. `notePopup` = { zone } ouvert,
+  // `null` fermé ; `noteDraft` est le texte en cours d'édition.
+  const [notePopup, setNotePopup] = useState(null)
+  const [noteDraft, setNoteDraft] = useState('')
   // Miroir en ref, lu par les callbacks à identité stable (voir onPageRenderSuccess).
   const annotationsRef = useRef([])
   useEffect(() => { annotationsRef.current = annotations }, [annotations])
@@ -559,6 +564,14 @@ export const PDFReader = () => {
     return map
   }, [zones])
 
+  // Zones porteuses d'une ملاحظة, triées par page, pour l'onglet dédié du panneau.
+  const zoneNotes = useMemo(
+    () => zones
+      .filter(z => z.note && z.note.trim())
+      .sort((a, b) => a.page_number - b.page_number),
+    [zones]
+  )
+
   const createZone = useCallback(async (pageNum, rect) => {
     if (!user || !bookId) return
 
@@ -603,6 +616,61 @@ export const PDFReader = () => {
       setZones(prev => [...prev, zone])
     }
   }, [])
+
+  // ── ملاحظة ancrée à une zone marqueur ──────────────────────────────────────
+  // La note vit dans la colonne `page_highlights.note` (migration 4) : elle est
+  // donc liée aux coordonnées de la zone, et non à une page entière.
+
+  const openZoneNote = useCallback((zone) => {
+    setNoteDraft(zone.note || '')
+    setNotePopup({ zone })
+  }, [])
+
+  // Suppression directe depuis la liste du panneau (sans passer par la popup).
+  const clearZoneNote = async (zone) => {
+    const previousNote = zone.note || null
+    setZones(prev => prev.map(z => (z.id === zone.id ? { ...z, note: null } : z)))
+    try {
+      const { error } = await supabase
+        .from('page_highlights')
+        .update({ note: null })
+        .eq('id', zone.id)
+      if (error) throw error
+      setToastMessage('تم حذف الملاحظة ✓')
+      setShowToast(true)
+    } catch (err) {
+      console.error('Échec de la suppression de la ملاحظة:', err.message)
+      setZones(prev => prev.map(z => (z.id === zone.id ? { ...z, note: previousNote } : z)))
+    }
+  }
+
+  const saveZoneNote = async (rawText) => {
+    if (!notePopup) return
+    const zone = notePopup.zone
+    const previousNote = zone.note || null
+    const text = (rawText ?? noteDraft).trim()
+    const nextNote = text || null
+
+    // Écriture optimiste : la pastille passe en « note présente » sans attendre
+    // le réseau, cohérent avec le reste du marqueur (createZone/deleteZone).
+    setZones(prev => prev.map(z => (z.id === zone.id ? { ...z, note: nextNote } : z)))
+    setNotePopup(null)
+
+    try {
+      const { error } = await supabase
+        .from('page_highlights')
+        .update({ note: nextNote })
+        .eq('id', zone.id)
+      if (error) throw error
+
+      setToastMessage(nextNote ? 'تم حفظ الملاحظة ✓' : 'تم حذف الملاحظة ✓')
+      setShowToast(true)
+    } catch (err) {
+      console.error('Échec de l\'enregistrement de la ملاحظة:', err.message)
+      // Retour à l'état précédent en cas d'échec.
+      setZones(prev => prev.map(z => (z.id === zone.id ? { ...z, note: previousNote } : z)))
+    }
+  }
 
   // ── Marque-pages manuels ───────────────────────────────────────────────────
   // Table dédiée `bookmarks` depuis la migration 2. Le repérage automatique
@@ -1164,6 +1232,7 @@ export const PDFReader = () => {
                     markerColor={markerColor}
                     onCreateZone={createZone}
                     onDeleteZone={deleteZone}
+                    onOpenNote={openZoneNote}
                   />
                 )
               })}
@@ -1396,7 +1465,7 @@ export const PDFReader = () => {
             <div className="flex border-b border-cardBorder dark:border-white/10 bg-white dark:bg-[#2C2C2A]">
               <button
                 onClick={() => setActiveTab('annotations')}
-                className={`flex-1 py-3 text-center text-xs font-bold transition-all border-b-2 ${
+                className={`flex-1 py-2.5 px-1 text-center text-[11px] font-bold transition-all border-b-2 whitespace-nowrap ${
                   activeTab === 'annotations'
                     ? 'border-primary text-primary'
                     : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
@@ -1406,7 +1475,7 @@ export const PDFReader = () => {
               </button>
               <button
                 onClick={() => setActiveTab('bookmarks')}
-                className={`flex-1 py-3 text-center text-xs font-bold transition-all border-b-2 ${
+                className={`flex-1 py-2.5 px-1 text-center text-[11px] font-bold transition-all border-b-2 whitespace-nowrap ${
                   activeTab === 'bookmarks'
                     ? 'border-primary text-primary'
                     : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
@@ -1415,14 +1484,24 @@ export const PDFReader = () => {
                 الإشارات ({bookmarks.length})
               </button>
               <button
+                onClick={() => setActiveTab('zonenotes')}
+                className={`flex-1 py-2.5 px-1 text-center text-[11px] font-bold transition-all border-b-2 whitespace-nowrap ${
+                  activeTab === 'zonenotes'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
+                }`}
+              >
+                ملاحظات ({zoneNotes.length})
+              </button>
+              <button
                 onClick={() => setActiveTab('notes')}
-                className={`flex-1 py-3 text-center text-xs font-bold transition-all border-b-2 ${
+                className={`flex-1 py-2.5 px-1 text-center text-[11px] font-bold transition-all border-b-2 whitespace-nowrap ${
                   activeTab === 'notes'
                     ? 'border-primary text-primary'
                     : 'border-transparent text-textSecondary dark:text-white/60 hover:text-textPrimary dark:hover:text-white'
                 }`}
               >
-                ملاحظات
+                مفكرة
               </button>
             </div>
             
@@ -1562,8 +1641,45 @@ export const PDFReader = () => {
                     </div>
                   )}
                 </div>
+              ) : activeTab === 'zonenotes' ? (
+                /* Tab 3 : ملاحظات ancrées aux zones marqueur */
+                <div className="space-y-3">
+                  {zoneNotes.length === 0 ? (
+                    <p className="text-xs text-textSecondary dark:text-white/40 text-center py-8 leading-relaxed">
+                      لا توجد ملاحظات مثبّتة بعد. ظلّل منطقة بقلم التظليل ثم اضغط «+ ملاحظة» تحتها لإضافة ملاحظة مرتبطة بموضعها.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {zoneNotes.map(zone => (
+                        <div
+                          key={zone.id}
+                          onClick={() => { scrollToPage(zone.page_number); openZoneNote(zone) }}
+                          className="p-3 rounded-custom border-r-4 border-primary bg-primary/5 dark:bg-primary/10 text-xs relative group transition-all cursor-pointer hover:shadow-md"
+                        >
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <span className="flex items-center gap-1.5 font-bold text-primary">
+                              <StickyNote className="w-3.5 h-3.5" />
+                              <span>صفحة {zone.page_number}</span>
+                            </span>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); clearZoneNote(zone) }}
+                              aria-label={`حذف الملاحظة في صفحة ${zone.page_number}`}
+                              title="حذف الملاحظة"
+                              className="p-1 text-textSecondary hover:text-danger rounded hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                          <p className="text-textPrimary dark:text-white leading-relaxed break-words font-arabic whitespace-pre-wrap line-clamp-4">
+                            {zone.note}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               ) : (
-                /* Tab 3: Free Notes */
+                /* Tab 4 : notes libres (مفكرة) */
                 <div className="flex flex-col space-y-2 h-full">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] text-textSecondary dark:text-white/60 font-bold">اكتب ملاحظاتك بحرية</span>
@@ -1584,6 +1700,73 @@ export const PDFReader = () => {
             </div>
           </div>
         </>
+      )}
+
+      {/* Popup d'édition de la ملاحظة ancrée à une zone marqueur */}
+      {notePopup && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          style={{ direction: 'rtl' }}
+        >
+          <div
+            className="absolute inset-0 bg-[#2C2C2A]/40 backdrop-blur-[2px]"
+            onClick={() => setNotePopup(null)}
+          />
+          <div className="relative w-full max-w-md bg-white dark:bg-[#2C2C2A] rounded-custom shadow-2xl border border-cardBorder dark:border-white/10 p-5 font-arabic animate-fade-in">
+            {/* En-tête */}
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-textPrimary dark:text-white text-sm flex items-center gap-2">
+                <StickyNote className="w-4 h-4 text-primary" />
+                <span>ملاحظة — صفحة {notePopup.zone.page_number}</span>
+              </h3>
+              <button
+                onClick={() => setNotePopup(null)}
+                aria-label="إغلاق"
+                className="p-1 hover:bg-cardBorder/50 dark:hover:bg-white/10 rounded-full transition-colors text-textSecondary hover:text-textPrimary dark:text-white/60 dark:hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <textarea
+              autoFocus
+              value={noteDraft}
+              onChange={(e) => setNoteDraft(e.target.value)}
+              placeholder="اكتب ملاحظتك حول هذا الموضع..."
+              className="w-full h-40 p-3 text-xs bg-bgMain dark:bg-[#1E1E1C] border border-cardBorder dark:border-white/10 dark:text-white rounded-custom focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary resize-none font-arabic leading-relaxed"
+            />
+
+            {/* Actions */}
+            <div className="flex items-center justify-between mt-4">
+              {(notePopup.zone.note && notePopup.zone.note.trim()) ? (
+                <button
+                  onClick={() => saveZoneNote('')}
+                  className="flex items-center gap-1.5 px-3 py-2 text-danger hover:bg-danger hover:text-white rounded-custom text-xs font-bold transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>حذف الملاحظة</span>
+                </button>
+              ) : (
+                <span />
+              )}
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setNotePopup(null)}
+                  className="px-4 py-2 text-textSecondary dark:text-white/70 hover:text-textPrimary dark:hover:text-white rounded-custom text-xs font-bold transition-colors"
+                >
+                  إلغاء
+                </button>
+                <button
+                  onClick={() => saveZoneNote()}
+                  className="px-4 py-2 bg-primary hover:bg-primary/95 text-white rounded-custom text-xs font-bold transition-colors"
+                >
+                  حفظ
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
     </div>
