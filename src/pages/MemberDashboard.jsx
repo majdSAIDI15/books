@@ -8,6 +8,7 @@ import { ProgressBar } from '../components/ProgressBar'
 import { BookCoverThumb } from '../components/BookCoverThumb'
 import { AccountSettings } from '../components/AccountSettings'
 import { InstallButton } from '../components/InstallButton'
+import { ChallengesPanel } from '../components/ChallengesPanel'
 import {
   BookOpen, Clock, Settings, Bell, BellOff, CheckCircle2, ChevronDown, ChevronUp,
   AlertCircle, Flame, TrendingUp, UserCog
@@ -308,6 +309,9 @@ export const MemberDashboard = () => {
           {/* Installation de l'application (point d'entrée permanent) */}
           <InstallButton />
         </div>
+
+        {/* Défis / programmes de lecture */}
+        <ChallengesPanel books={books} sessions={sessions} allLogs={allLogs} />
 
         {/* Active Books Progress */}
         {activeBooks.length > 0 && (

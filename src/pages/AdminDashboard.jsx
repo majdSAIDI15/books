@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext'
 import { Navbar } from '../components/Navbar'
 import { ProgressBar } from '../components/ProgressBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { ChallengeAdminPanel } from '../components/ChallengeAdminPanel'
 import {
   Users, BookOpen, UserCheck, Plus, FileText, Check, AlertCircle, RefreshCw, Trash2,
   ChevronDown, ChevronUp, CheckCircle2, XCircle, Flame, TrendingUp,
@@ -41,18 +42,6 @@ const UPLOAD_STEP_LABELS = {
   cover: 'جاري إنشاء صورة الغلاف...',
   saving: 'جاري حفظ بيانات الكتاب...'
 }
-
-/**
- * Les notifications ne sont réellement envoyables que si les DEUX clés OneSignal
- * sont renseignées. Sans cela on désactive le bouton plutôt que de faire croire
- * à un envoi réussi.
- */
-const NOTIFICATIONS_CONFIGURED = Boolean(
-  import.meta.env.VITE_ONESIGNAL_APP_ID &&
-  import.meta.env.VITE_ONESIGNAL_APP_ID !== 'your_onesignal_app_id_here' &&
-  import.meta.env.VITE_ONESIGNAL_REST_API_KEY &&
-  import.meta.env.VITE_ONESIGNAL_REST_API_KEY !== 'YOUR_ONESIGNAL_REST_API_KEY'
-)
 
 const getFlameIndicator = (logs, readToday) => {
   if (readToday) {
@@ -259,63 +248,47 @@ export const AdminDashboard = () => {
   const [formError, setFormError] = useState('')
   const [formSuccess, setFormSuccess] = useState('')
 
-  const sendOneSignalNotification = async (memberId, name) => {
-    const appId = import.meta.env.VITE_ONESIGNAL_APP_ID
-    const restApiKey = import.meta.env.VITE_ONESIGNAL_REST_API_KEY
-    
-    if (!appId || appId === 'your_onesignal_app_id_here') {
-      throw new Error('لم يتم إعداد App ID الخاص بـ OneSignal')
-    }
-    
-    if (!restApiKey || restApiKey === 'YOUR_ONESIGNAL_REST_API_KEY') {
-      throw new Error('خدمة التنبيهات غير مفعّلة: مفتاح OneSignal REST API غير مهيأ.')
-    }
+  // Envoi d'un rappel par EMAIL via la fonction Netlify (/api/send-reminder).
+  // La clé Brevo reste côté serveur ; ici on ne transmet que le jeton admin et le
+  // destinataire. Remplace l'ancien push OneSignal (bloqué par les ad-blockers et
+  // capricieux sur mobile).
+  const sendEmailReminder = async (email, name) => {
+    const { data: { session } } = await supabase.auth.getSession()
+    const token = session?.access_token
+    if (!token) throw new Error('انتهت الجلسة، سجّل الدخول من جديد.')
 
-    const response = await fetch('https://onesignal.com/api/v1/notifications', {
+    const response = await fetch('/api/send-reminder', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        // Les clés REST récentes utilisent le schéma « Key » (et non plus
-        // « Basic » comme les anciennes clés).
-        'Authorization': `Key ${restApiKey}`
+        Authorization: `Bearer ${token}`
       },
-      body: JSON.stringify({
-        app_id: appId,
-        contents: {
-          ar: `مرحباً ${name}، نود تذكيرك بالعودة للقراءة اليومية لمواصلة تقدمك! 📚`,
-          en: `Hello ${name}, we'd love to remind you to return to your daily reading and continue your progress! 📚`
-        },
-        headings: {
-          ar: 'تذكير بالقراءة 🌟',
-          en: 'Reading Reminder 🌟'
-        },
-        include_aliases: {
-          external_id: [memberId]
-        },
-        target_channel: 'push'
-      })
+      body: JSON.stringify({ email, name })
     })
-    
+
     if (!response.ok) {
-      const errorData = await response.json()
-      throw new Error(errorData.errors?.[0] || 'فشل إرسال التنبيه')
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.error || 'فشل إرسال التذكير')
     }
-    
     return true
   }
 
-  const handleSendReminder = async (memberId, memberName) => {
+  const handleSendReminder = async (memberId, memberName, memberEmail) => {
     setNotifError('')
+    if (!memberEmail) {
+      setNotifError('لا يوجد بريد إلكتروني لهذا العضو.')
+      return
+    }
     setSendingNotif(prev => ({ ...prev, [memberId]: 'sending' }))
     try {
-      await sendOneSignalNotification(memberId, memberName)
+      await sendEmailReminder(memberEmail, memberName)
       setSendingNotif(prev => ({ ...prev, [memberId]: 'success' }))
       setTimeout(() => {
         setSendingNotif(prev => ({ ...prev, [memberId]: null }))
       }, 3000)
     } catch (err) {
       console.error(err)
-      setNotifError(err.message || 'فشل إرسال التنبيه')
+      setNotifError(err.message || 'فشل إرسال التذكير')
       setSendingNotif(prev => ({ ...prev, [memberId]: 'error' }))
       setTimeout(() => {
         setSendingNotif(prev => ({ ...prev, [memberId]: null }))
@@ -1074,6 +1047,9 @@ export const AdminDashboard = () => {
         )}
 
         <div className="space-y-8">
+          {/* Défis / programmes de lecture */}
+          <ChallengeAdminPanel />
+
           {/* Absence Alerts Section */}
           <div className="bg-white border border-red-200 rounded-custom shadow-sm overflow-hidden text-right">
             <div className="px-6 py-5 border-b border-red-100 bg-red-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1089,15 +1065,6 @@ export const AdminDashboard = () => {
               </span>
             </div>
             <div className="p-6">
-              {!NOTIFICATIONS_CONFIGURED && (
-                <div className="mb-4 bg-orange-50 text-warning text-xs font-semibold px-4 py-3 rounded-custom border border-warning/20 flex items-start space-x-2 space-x-reverse">
-                  <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
-                  <div className="text-right">
-                    <p className="font-bold">خدمة التنبيهات غير مفعّلة</p>
-                    <p className="opacity-90 mt-0.5">لن يتم إرسال أي تذكير حتى يتم إعداد مفاتيح OneSignal. أزرار الإرسال معطّلة حالياً.</p>
-                  </div>
-                </div>
-              )}
               {notifError && (
                 <div className="mb-4 bg-red-50 text-danger text-xs font-semibold px-4 py-3 rounded-custom border border-danger/20 flex items-start space-x-2 space-x-reverse">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -1139,9 +1106,9 @@ export const AdminDashboard = () => {
                         <div className="border-t border-red-100/50 pt-3 mt-1 flex justify-between items-center text-xs text-red-800/80 gap-2">
                           <span className="truncate">آخر قراءة: {lastDate || 'لم يقرأ بعد'}</span>
                           <button
-                            onClick={() => handleSendReminder(member.id, member.name)}
-                            disabled={status === 'sending' || !NOTIFICATIONS_CONFIGURED}
-                            title={NOTIFICATIONS_CONFIGURED ? 'إرسال تذكير' : 'خدمة التنبيهات غير مهيأة'}
+                            onClick={() => handleSendReminder(member.id, member.name, member.email)}
+                            disabled={status === 'sending' || !member.email}
+                            title={member.email ? 'إرسال تذكير بالبريد الإلكتروني' : 'لا يوجد بريد إلكتروني لهذا العضو'}
                             className={`py-1.5 px-3.5 font-bold rounded-custom text-xs transition-all flex items-center space-x-1 space-x-reverse shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
                               status === 'sending'
                                 ? 'bg-red-100 text-red-400 cursor-not-allowed border border-red-200'

@@ -1,0 +1,26 @@
+# Configuration Netlify.
+#
+# - Build Vite standard (sortie dans dist/).
+# - Fonctions serverless dans netlify/functions/ (l'envoi d'email y vit, pour que
+#   la clé Brevo reste côté serveur et jamais dans le bundle navigateur).
+# - Redirections : /api/* -> fonctions (URLs propres), puis fallback SPA vers
+#   index.html. Sur Netlify, les fichiers statiques réels (ex. /OneSignalSDKWorker.js)
+#   gardent la priorité sur le fallback, donc rien n'est cassé.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
