@@ -22,8 +22,22 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Le SDK OneSignal est chargé à la demande depuis MemberDashboard
-         (src/lib/oneSignal.js) : il ne servait à rien sur l'écran de login. -->
+    <!-- OneSignal Web SDK v16 (push web), intégration officielle « OneSignalDeferred ».
+         L'App ID vient de VITE_ONESIGNAL_APP_ID : Vite remplace %VITE_ONESIGNAL_APP_ID%
+         au build, donc il reste pilotable via l'environnement (Netlify) sans toucher
+         au code. L'init se fait ICI, une seule fois ; les composants se contentent
+         ensuite de login()/addTag()/requestPermission() (voir src/lib/oneSignal.js). -->
+    <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+    <script>
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      OneSignalDeferred.push(async function (OneSignal) {
+        await OneSignal.init({
+          appId: "%VITE_ONESIGNAL_APP_ID%",
+          // Autorise les tests d'abonnement en local (http://localhost).
+          allowLocalhostAsSecureOrigin: true,
+        });
+      });
+    </script>
   </head>
   <body class="bg-[#F8F7F4] text-[#2C2C2A] font-arabic antialiased">
     <div id="root"></div>

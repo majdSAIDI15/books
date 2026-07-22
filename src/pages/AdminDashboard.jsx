@@ -275,7 +275,9 @@ export const AdminDashboard = () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Basic ${restApiKey}`
+        // Les clés REST récentes utilisent le schéma « Key » (et non plus
+        // « Basic » comme les anciennes clés).
+        'Authorization': `Key ${restApiKey}`
       },
       body: JSON.stringify({
         app_id: appId,

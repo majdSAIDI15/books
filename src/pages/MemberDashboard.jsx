@@ -16,7 +16,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell
 } from 'recharts'
 import { getLocalDateStr, buildChartData, getLast7Total, getStreak, sumPagesForDate } from '../lib/stats'
-import { loadOneSignal } from '../lib/oneSignal'
+import { withOneSignal } from '../lib/oneSignal'
 
 // ─── Custom BarChart Tooltip ──────────────────────────────────────────────────
 
@@ -113,13 +113,11 @@ export const MemberDashboard = () => {
     let active = true
 
     const initOneSignal = async () => {
-      const OneSignal = await loadOneSignal()
+      // L'init est faite dans index.html ; on attend juste que le SDK soit prêt,
+      // puis on rattache l'utilisateur courant à son abonnement OneSignal.
+      const OneSignal = await withOneSignal()
       if (!OneSignal || !active) return
       try {
-        await OneSignal.init({
-          appId: import.meta.env.VITE_ONESIGNAL_APP_ID,
-          allowLocalhostAsSecureOrigin: true
-        })
         if (user) {
           await OneSignal.login(user.id)
           if (user.email) await OneSignal.User.addTag('email', user.email)
@@ -127,7 +125,7 @@ export const MemberDashboard = () => {
         if (!active) return
         if (user?.user_metadata?.notification_time) setNotifTime(user.user_metadata.notification_time)
         setNotifEnabled(OneSignal.Notifications.permission === 'granted')
-      } catch (e) { console.error('OneSignal init failed:', e) }
+      } catch (e) { console.error('OneSignal setup failed:', e) }
     }
 
     initOneSignal()
@@ -138,7 +136,7 @@ export const MemberDashboard = () => {
   // plutôt que par des `alert()` natifs bloquants (§4.5).
   const handleToggleNotifications = async () => {
     setSettingsMessage('')
-    const OneSignal = await loadOneSignal()
+    const OneSignal = await withOneSignal()
     if (!OneSignal) {
       setSettingsMessage('خدمة التنبيهات غير متوفرة حالياً.')
       return
